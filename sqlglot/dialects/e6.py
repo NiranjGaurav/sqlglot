@@ -24,22 +24,52 @@ from typing import Any, Optional
 if t.TYPE_CHECKING:
     from sqlglot._typing import E
 
+"""
 
+following function converts datatypes to INT if not already integer
+if not in integer type then casts it as BIGINT
+
+eg:  -- Input (from another dialect)
+  SELECT DATE_ADD(date_col, INTERVAL '5.5' DAY)
+
+  -- E6 Output (5.5 gets cast to BIGINT)
+  SELECT DATE_ADD('DAY', CAST('5.5' AS BIGINT), date_col)
+"""
 def _to_int(expression: exp.Expression) -> exp.Expression:
-    if not expression.type:
+    if not expression.type: # check if type is already set
         from sqlglot.optimizer.annotate_types import annotate_types
 
+        # annotate creates a TYPE object that holds the type information, adds .type attrubute
         annotate_types(expression)
+    #now check if its ine of the integer type
     if expression.type and expression.type.this not in exp.DataType.INTEGER_TYPES:
+        #if not return the BIGINT type
         return exp.cast(expression, to=exp.DataType.Type.BIGINT)
     return expression
 
 
+
+"""
+it creates a date type expression
+
+SELECT DATE('2023-12-25') FROM table1;
+in the above example, arguments of date is a string '2023-12-25'
+so this should be converted to date so we use this function to do so
+"""
 def _build_date(args: t.List[exp.Expression]) -> exp.Expression:
     this = seq_get(args, 0)
     return exp.Date(this=this)
 
+"""
+this function takes the input and creates builder for different date and time functions 
 
+-- String Literal -> Single arg and String then DATE
+-- Integer Literal -> Integer then TIMESTAMP using UnixToTime 
+-- Float Literal-> use builder function from Dialect.py
+
+if encounter none then enter ANONYMOUS
+
+"""
 def _build_datetime(
     name: str, kind: exp.DataType.Type, safe: bool = False
 ) -> t.Callable[[t.List], exp.Func]:
@@ -68,6 +98,17 @@ def _build_datetime(
 
         # Determine if the argument is an integer literal.
         int_value = value is not None and is_int(value.name)
+        """
+        
+  Yes, the isinstance(value, exp.Literal) check is absolutely required because:
+
+  1. .is_string attribute: Only exp.Literal has this attribute. Other expressions would throw AttributeError
+  2. .this attribute behavior: While many expressions have .this, its meaning varies:
+    - exp.Literal.this → the actual value (string/number)
+    - exp.Column.this → an Identifier object
+    - exp.CurrentTimestamp.this → None
+  3. Type-specific logic: The literal-specific logic (casting, unix timestamp detection, float checking) only makes sense for literal valuesv
+        """
 
         # Handle cases where the argument is a literal value.
         if isinstance(value, exp.Literal):
@@ -101,15 +142,39 @@ def _build_datetime(
     # Return the builder function, which can be called with arguments to construct SQL expressions.
     return _builder
 
+"""
+this is also similar to _build_date 
+but it could handle timestamps
 
+  Key Differences Between DATE and TIMESTAMP
+
+  | Aspect        | _build_date                      | _build_timestamp                        |
+  |---------------|----------------------------------|-----------------------------------------|
+  | Purpose       | Converts input to date (no time) | Converts input to timestamp (with time) |
+  | AST Node      | exp.Date                         | exp.Timestamp                           |
+  | SQL Function  | DATE(...)                        | TIMESTAMP(...)                          |
+  | Typical Input | Date strings, timestamps         | Date/time strings, dates                |
+  | Output Type   | Date only                        | Date + Time                             |
+
+  Both functions follow the same simple pattern: extract the first argument and wrap it in the appropriate expression type, enabling SQLGlot to handle
+  date/time conversions consistently across different SQL dialects.
+
+"""
 def _build_timestamp(args: t.List[exp.Expression]) -> exp.Expression:
     this = seq_get(args, 0)
     return exp.Timestamp(this=this)
 
+"""
+the following function is used to create a builders for string functions that require 
+text input
+
+ The _build_with_arg_as_text ensures all non-string inputs are cast to TEXT
+"""
+
 
 def _build_with_arg_as_text(
     klass: t.Type[exp.Expression],
-) -> t.Callable[[t.List[exp.Expression]], exp.Expression]:
+) -> t.Callable[[t.List[exp.Expression]], exp.Expression]: #t.TYPE indicates that its a class type and not an instance
     def _parse(args: t.List[exp.Expression]) -> exp.Expression:
         this = seq_get(args, 0)
 
@@ -122,6 +187,8 @@ def _build_with_arg_as_text(
         if expression:
             kwargs["expression"] = expression
 
+        #klass is a instatiator used for class simce class cannot be used
+        #used to create a instance of a class
         return klass(**kwargs)
 
     return _parse
@@ -152,6 +219,7 @@ def _build_formatted_time_with_or_without_zone(
     """
 
     def _builder(args: t.List):
+        #check for the time zone
         if len(args) == 2:
             return exp_class(
                 this=seq_get(args, 1),
