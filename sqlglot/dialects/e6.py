@@ -203,7 +203,9 @@ def _build_from_unixtime_withunit(args: t.List[exp.Expression]) -> exp.Func:
 
     return exp.UnixToTime(this=this, scale=unit)
 
-
+"""
+this function is used to parse expressions containing time to proper time formats 
+"""
 def _build_formatted_time_with_or_without_zone(
     exp_class: t.Type[E], default: t.Optional[bool | str] = None
 ) -> t.Callable[[t.List], E]:
