@@ -1,0 +1,6 @@
+apiVersion: v2
+name: sqlglot-backend
+description: SQLGlot Backend - FastAPI + Celery workers with Redis for SQL processing
+type: application
+version: 0.1.0
+appVersion: "1.0.0"

@@ -1,0 +1,36 @@
+# Default values for sqlglot-frontend
+replicaCount: 1
+
+image:
+  repository: sqlglot-frontend
+  pullPolicy: Never  # For Minikube - change to "Always" for EKS/ECR
+  tag: "latest"
+
+service:
+  type: NodePort
+  port: 3000
+  nodePort: 30000  # For Minikube access
+
+ingress:
+  enabled: false
+
+resources:
+  limits:
+    cpu: 500m
+    memory: 512Mi
+  requests:
+    cpu: 250m
+    memory: 256Mi
+
+# Environment variables
+env:
+  - name: NEXT_PUBLIC_API_URL
+    value: "http://sqlglot-backend:8080"
+  - name: NODE_ENV
+    value: "production"
+
+# Health checks
+healthCheck:
+  enabled: true
+  path: "/"
+  port: 3000

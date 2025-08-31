@@ -1,0 +1,69 @@
+# Default values for sqlglot-backend
+api:
+  replicaCount: 3  # Multiple API instances for load handling
+  image:
+    repository: sqlglot-api
+    pullPolicy: Never  # For Minikube - change to "Always" for EKS/ECR
+    tag: "latest"
+  service:
+    type: NodePort
+    port: 8080
+    nodePort: 30100  # For Minikube access
+  resources:
+    limits:
+      cpu: 1000m
+      memory: 2Gi
+    requests:
+      cpu: 500m
+      memory: 1Gi
+
+worker:
+  replicaCount: 5  # More workers for distributed processing
+  image:
+    repository: sqlglot-worker
+    pullPolicy: Never  # For Minikube - change to "Always" for EKS/ECR
+    tag: "latest"
+  resources:
+    limits:
+      cpu: 2000m
+      memory: 4Gi
+    requests:
+      cpu: 1000m
+      memory: 2Gi
+
+redis:
+  enabled: true
+  image:
+    repository: redis
+    tag: "7-alpine"
+    pullPolicy: IfNotPresent
+  service:
+    port: 6379
+  resources:
+    limits:
+      cpu: 500m
+      memory: 1Gi
+    requests:
+      cpu: 250m
+      memory: 512Mi
+  persistence:
+    enabled: true
+    size: 8Gi
+
+# Environment variables
+env:
+  - name: CELERY_BROKER_URL
+    value: "redis://sqlglot-backend-redis:6379/0"
+  - name: CELERY_RESULT_BACKEND
+    value: "redis://sqlglot-backend-redis:6379/0"
+  - name: PYTHONUNBUFFERED
+    value: "1"
+  - name: ENABLE_GUARDRAIL
+    value: "False"
+
+# Health checks
+healthCheck:
+  enabled: true
+  api:
+    path: "/health"
+    port: 8080
