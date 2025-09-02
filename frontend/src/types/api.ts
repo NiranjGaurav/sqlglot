@@ -28,6 +28,28 @@ export interface ProcessingStatus {
   start_time?: string
   end_time?: string
   duration?: string
+  iceberg_status: IcebergStatus
+}
+
+export interface IcebergStatus {
+  total_queued: number
+  write_queue: number
+  retry_queue: number
+  failed_queue: number
+  session_written: number
+  session_writing: number
+  session_retrying: number
+  session_failed: number
+  session_total: number
+  batch_details: IcebergBatchDetail[]
+  error?: string
+}
+
+export interface IcebergBatchDetail {
+  batch_id: string
+  status: string
+  display_status: string
+  status_type: 'success' | 'writing' | 'retrying' | 'failed'
 }
 
 export interface TaskDetail {

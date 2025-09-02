@@ -22,7 +22,7 @@ def get_filesystem(path: str) -> Optional[fs.FileSystem]:
     Get appropriate filesystem based on path (S3 or local)
     """
     if path.startswith('s3://'):
-        # AWS credentials - Replace with your actual credentials
+        # AWS credentials - Hardcoded for deployment
         s3fs = fs.S3FileSystem(
             access_key=os.getenv("AWS_ACCESS_KEY_ID", "YOUR_ACCESS_KEY_ID"),
             secret_key=os.getenv("AWS_SECRET_ACCESS_KEY", "YOUR_SECRET_ACCESS_KEY"), 

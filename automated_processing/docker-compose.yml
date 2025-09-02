@@ -15,14 +15,30 @@ services:
     networks:
       - automated-network
 
+  # Frontend service - Next.js UI
+  frontend:
+    build:
+      context: ../frontend
+      dockerfile: Dockerfile
+    container_name: sqlglot-frontend
+    ports:
+      - "3000:3000"
+    environment:
+      - NEXT_PUBLIC_API_URL=http://api:8100
+    depends_on:
+      - api
+    networks:
+      - automated-network
+    restart: unless-stopped
+
   # API service - FastAPI with automated processing endpoints
   api:
     build:
-      context: ..  # Parent directory (e6-sqlglot-function)
-      dockerfile: Dockerfile.api
+      context: ..  # Parent directory (sqlglot)
+      dockerfile: Dockerfile  # Main backend Dockerfile
     container_name: converter-api
     ports:
-      - "8080:8080"
+      - "8080:8080"  # Match the port from existing Dockerfile
     environment:
       - CELERY_BROKER_URL=redis://redis:6379/0
       - CELERY_RESULT_BACKEND=redis://redis:6379/0

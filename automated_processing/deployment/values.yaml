@@ -1,6 +1,6 @@
 # Default values for sqlglot-backend
 api:
-  replicaCount: 3  # Multiple API instances for load handling
+  replicaCount: 1  # Multiple API instances for load handling
   image:
     repository: sqlglot-api
     pullPolicy: Never  # For Minikube - change to "Always" for EKS/ECR
@@ -18,18 +18,40 @@ api:
       memory: 1Gi
 
 worker:
-  replicaCount: 5  # More workers for distributed processing
+  replicaCount: 1  # Keep at 1 - HPA will manage scaling
   image:
     repository: sqlglot-worker
     pullPolicy: Never  # For Minikube - change to "Always" for EKS/ECR
     tag: "latest"
   resources:
     limits:
-      cpu: 2000m
-      memory: 4Gi
+      cpu: 4000m      # Increased for SQL processing workload
+      memory: 8Gi
     requests:
-      cpu: 1000m
-      memory: 2Gi
+      cpu: 500m       # Lower baseline for better scheduling
+      memory: 1Gi
+  
+  # Horizontal Pod Autoscaler configuration
+  hpa:
+    enabled: true
+    minReplicas: 1
+    maxReplicas: 20
+    metrics:
+      cpu:
+        enabled: true
+        targetUtilization: 70
+      memory:
+        enabled: true
+        targetUtilization: 80
+    behavior:
+      scaleDown:
+        stabilizationWindowSeconds: 300  # Wait 5 min before scaling down
+        percentValue: 10                 # Scale down by 10% at a time
+        periodSeconds: 60
+      scaleUp:
+        stabilizationWindowSeconds: 60   # Quick scale up for high load
+        percentValue: 100                # Double capacity when needed
+        periodSeconds: 15
 
 redis:
   enabled: true
@@ -41,14 +63,23 @@ redis:
     port: 6379
   resources:
     limits:
-      cpu: 500m
-      memory: 1Gi
+      cpu: 1000m      # Increased for better performance
+      memory: 2Gi
     requests:
       cpu: 250m
       memory: 512Mi
   persistence:
     enabled: true
-    size: 8Gi
+    size: 10Gi
+  # Redis performance configuration
+  config: |
+    maxmemory 1536mb
+    maxmemory-policy allkeys-lru
+    tcp-keepalive 60
+    timeout 300
+    save 900 1
+    save 300 10
+    save 60 10000
 
 # Environment variables
 env:
@@ -60,6 +91,10 @@ env:
     value: "1"
   - name: ENABLE_GUARDRAIL
     value: "False"
+  - name: ENVIRONMENT
+    value: "development"
+  - name: UVICORN_WORKERS
+    value: "1"
 
 # Health checks
 healthCheck:

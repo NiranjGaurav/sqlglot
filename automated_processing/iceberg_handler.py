@@ -1,16 +1,11 @@
 """
 Iceberg Handler Module
-Manages Iceberg table initialization and statistics
+Manages Iceberg table initialization and statistics with AWS Glue catalog
 """
 
 import logging
 import os
-from typing import Dict, Any
-from pathlib import Path
-from pyiceberg.catalog.sql import SqlCatalog
-from pyiceberg.schema import Schema, NestedField
-from pyiceberg.types import StringType, IntegerType, TimestampType, ListType, LongType
-from pyiceberg.partitioning import PartitionSpec, PartitionField
+from pyiceberg.catalog import load_catalog
 
 # Setup logging
 logging.basicConfig(
@@ -19,11 +14,13 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Configuration - use absolute path and ensure directory exists
-# Force absolute path to be independent of working directory
-_current_file_dir = os.path.dirname(os.path.abspath(__file__))
-ICEBERG_WAREHOUSE_PATH = os.getenv("ICEBERG_WAREHOUSE_PATH", os.path.join(_current_file_dir, "iceberg_warehouse"))
-ICEBERG_CATALOG_NAME = os.getenv("ICEBERG_CATALOG_NAME", "local_catalog")
+# AWS Configuration - hardcoded credentials  
+AWS_ACCESS_KEY_ID = ""
+AWS_SECRET_ACCESS_KEY = ""
+AWS_SESSION_TOKEN = ""
+AWS_REGION = "us-east-1"
+S3_WAREHOUSE_PATH = "s3://batch-transpiler/testing-batch-processing/"
+ICEBERG_CATALOG_NAME = os.getenv("ICEBERG_CATALOG_NAME", "glue_catalog")
 
 # Global variables
 iceberg_catalog = None
@@ -31,129 +28,62 @@ batch_statistics_table = None
 
 
 def initialize_iceberg_catalog():
-    """Initialize Iceberg catalog and create tables if they don't exist"""
+    """Initialize AWS Glue Iceberg catalog and create tables if they don't exist"""
     global iceberg_catalog, batch_statistics_table
 
     try:
-        # Create warehouse directory if it doesn't exist
-        warehouse_path = Path(ICEBERG_WAREHOUSE_PATH).absolute()
-        warehouse_path.mkdir(parents=True, exist_ok=True)
+        logger.info(f"Initializing AWS Glue catalog with S3 warehouse: {S3_WAREHOUSE_PATH}")
         
-        # Ensure proper permissions on warehouse directory
-        try:
-            os.chmod(warehouse_path, 0o755)
-        except:
-            pass  # Might not be needed on all systems
+        # Set AWS credentials via environment variables (PyIceberg 0.7.0 works better this way)
+        os.environ['AWS_ACCESS_KEY_ID'] = AWS_ACCESS_KEY_ID
+        os.environ['AWS_SECRET_ACCESS_KEY'] = AWS_SECRET_ACCESS_KEY
+        os.environ['AWS_SESSION_TOKEN'] = AWS_SESSION_TOKEN
+        os.environ['AWS_DEFAULT_REGION'] = AWS_REGION
         
-        logger.info(f"Using Iceberg warehouse path: {warehouse_path}")
-
-        # SQLite database for catalog metadata
-        catalog_db = warehouse_path / "catalog.db"
-        
-        # Ensure catalog.db has proper permissions if it exists
-        if catalog_db.exists():
-            try:
-                os.chmod(catalog_db, 0o644)
-                logger.info(f"Using existing catalog database: {catalog_db}")
-            except:
-                pass
-        else:
-            logger.info(f"Will create new catalog database: {catalog_db}")
-
-        iceberg_catalog = SqlCatalog(
+        # Initialize AWS Glue catalog using pyiceberg load_catalog function
+        # Use minimal configuration with environment variables
+        iceberg_catalog = load_catalog(
             name=ICEBERG_CATALOG_NAME,
-            uri=f"sqlite:///{catalog_db}",
-            warehouse=f"file://{warehouse_path}"
+            type="glue",
+            warehouse=S3_WAREHOUSE_PATH,
+            region=AWS_REGION
         )
         
-        logger.info(f"Iceberg catalog initialized with URI: sqlite:///{catalog_db}")
-
-        # Define batch statistics table schema with partitioning fields
-        batch_stats_schema = Schema(
-            NestedField(1, "query_id", LongType(), required=False),
-            NestedField(2, "batch_id", StringType(), required=False),
-            NestedField(3, "company_name", StringType(), required=False),  # Partition field
-            NestedField(4, "event_date", StringType(), required=False),  # Partition field (format: YYYY-MM-DD)
-            NestedField(5, "batch_number", IntegerType(), required=False),  # Batch number for file naming
-            NestedField(6, "timestamp", TimestampType(), required=False),
-            NestedField(7, "status", StringType(), required=False),
-            NestedField(8, "executable", StringType(), required=False),
-            NestedField(9, "from_dialect", StringType(), required=False),
-            NestedField(10, "to_dialect", StringType(), required=False),
-            NestedField(11, "original_query", StringType(), required=False),
-            NestedField(12, "converted_query", StringType(), required=False),
-            NestedField(13, "supported_functions", ListType(element_id=20, element_type=StringType(), element_required=False), required=False),
-            NestedField(14, "unsupported_functions", ListType(element_id=21, element_type=StringType(), element_required=False), required=False),
-            NestedField(15, "udf_list", ListType(element_id=22, element_type=StringType(), element_required=False), required=False),
-            NestedField(16, "tables_list", ListType(element_id=23, element_type=StringType(), element_required=False), required=False),
-            NestedField(17, "processing_time_ms", LongType(), required=False),
-            NestedField(18, "error_message", StringType(), required=False),
-            NestedField(19, "unsupported_functions_after_transpilation", ListType(element_id=24, element_type=StringType(), element_required=False), required=False),
-            NestedField(20, "joins_list", ListType(element_id=25, element_type=StringType(), element_required=False), required=False)
-        )
-
-        # Define partition specification for company_name and event_date
-        partition_spec = PartitionSpec(
-            PartitionField(source_id=3, field_id=1000, transform="identity", name="company_name"),
-            PartitionField(source_id=4, field_id=1001, transform="identity", name="event_date")
-        )
+        logger.info(f"AWS Glue catalog initialized successfully")
 
         # Create namespace if it doesn't exist
         namespace = "default"
         try:
             iceberg_catalog.create_namespace(namespace)
-        except:
-            pass  # Namespace might already exist
+            logger.info(f"Created namespace: {namespace}")
+        except Exception as ns_error:
+            logger.info(f"Namespace {namespace} already exists or creation failed: {ns_error}")
 
-        # Create batch statistics table - try to load existing first
+        # Load existing batch statistics table
         table_identifier = f"{namespace}.batch_statistics"
         try:
-            # First try to load existing table
+            # Load existing table from S3
             batch_statistics_table = iceberg_catalog.load_table(table_identifier)
-            logger.info(f"Loaded existing Iceberg table: {table_identifier}")
+            logger.info(f"Successfully loaded existing Iceberg table: {table_identifier}")
             
-            # Check if table has the new schema with all required columns
+            # Log table schema for verification
             existing_columns = [field.name for field in batch_statistics_table.schema().fields]
-            required_columns = ["company_name", "event_date", "batch_number", "unsupported_functions_after_transpilation", "joins_list"]
-            missing_columns = [col for col in required_columns if col not in existing_columns]
+            logger.info(f"Table schema columns: {existing_columns}")
             
-            if missing_columns:
-                logger.info(f"Table missing required columns: {missing_columns}. Dropping and recreating table...")
-                try:
-                    # Drop the existing table
-                    iceberg_catalog.drop_table(table_identifier)
-                    logger.info(f"Dropped existing table: {table_identifier}")
-                    
-                    # Create new table with updated schema and partitioning
-                    batch_statistics_table = iceberg_catalog.create_table(
-                        identifier=table_identifier,
-                        schema=batch_stats_schema,
-                        partition_spec=partition_spec
-                    )
-                    logger.info(f"Created new Iceberg table with updated schema: {table_identifier}")
-                except Exception as recreate_error:
-                    logger.error(f"Failed to recreate table: {str(recreate_error)}")
-
         except Exception as e:
-            # Table doesn't exist, create a new one
-            try:
-                batch_statistics_table = iceberg_catalog.create_table(
-                    identifier=table_identifier,
-                    schema=batch_stats_schema,
-                    partition_spec=partition_spec
-                )
-                logger.info(f"Created new Iceberg table: {table_identifier}")
-            except Exception as create_error:
-                logger.error(f"Failed to create Iceberg table: {str(create_error)}")
-                batch_statistics_table = None
+            logger.error(f"Failed to load existing Iceberg table {table_identifier}: {str(e)}")
+            logger.info("The table should exist at s3://batch-transpiler/testing-batch-processing/default/batch_statistics/")
+            batch_statistics_table = None
 
-        logger.info("Iceberg catalog and tables initialized successfully")
+        logger.info("AWS Glue Iceberg catalog and tables initialized successfully")
         return True
 
     except Exception as e:
-        logger.error(f"Failed to initialize Iceberg catalog: {str(e)}")
+        logger.error(f"Failed to initialize AWS Glue Iceberg catalog: {str(e)}")
+        logger.error(f"Error details: {type(e).__name__}")
         return False
 
 
-# Initialize Iceberg catalog on module import
-initialize_iceberg_catalog()
+# Don't initialize on module import - causes segfault with forking
+# Initialize only in worker processes when needed
+# initialize_iceberg_catalog()

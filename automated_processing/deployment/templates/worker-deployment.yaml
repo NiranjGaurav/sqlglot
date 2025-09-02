@@ -23,3 +23,38 @@ spec:
             {{- toYaml .Values.env | nindent 12 }}
           resources:
             {{- toYaml .Values.worker.resources | nindent 12 }}
+          # Health checks for Celery workers
+          livenessProbe:
+            exec:
+              command:
+                - celery
+                - -A
+                - worker.celery
+                - inspect
+                - ping
+            initialDelaySeconds: 30
+            periodSeconds: 30
+            timeoutSeconds: 10
+            failureThreshold: 3
+          readinessProbe:
+            exec:
+              command:
+                - celery
+                - -A
+                - worker.celery
+                - inspect
+                - active
+            initialDelaySeconds: 15
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+          # Graceful shutdown
+          lifecycle:
+            preStop:
+              exec:
+                command:
+                  - /bin/sh
+                  - -c
+                  - "celery -A worker.celery control shutdown"
+      # Allow graceful termination
+      terminationGracePeriodSeconds: 60

@@ -40,6 +40,113 @@ def format_duration(seconds: float) -> str:
         return f"{hours}h {minutes}m {remaining_seconds}s"
 
 
+def get_iceberg_queue_status(session_id: str) -> Dict[str, Any]:
+    """
+    Get Iceberg queue status for batches belonging to a session with per-batch details
+    """
+    try:
+        import redis
+        r = redis.Redis(host='localhost', port=6379, db=0, decode_responses=False)
+        
+        # Get queue lengths
+        write_queue_len = r.llen('iceberg_write_queue')
+        retry_queue_len = r.llen('iceberg_retry_queue')
+        failed_queue_len = r.llen('iceberg_failed_queue')
+        
+        # Count session-specific statuses and collect per-batch details
+        session_written = 0
+        session_writing = 0
+        session_failed = 0
+        session_retrying = 0
+        batch_details = []
+        
+        # Get batch numbers from task IDs for this session, then check their status
+        # First find all task IDs for this session to extract batch numbers
+        task_keys = r.keys('celery-task-meta-*')
+        session_batch_numbers = []
+        
+        for key in task_keys:
+            task_id = key.decode().replace('celery-task-meta-', '')
+            if task_id.startswith(session_id + '_batch_'):
+                # Extract batch number from task ID (format: session_xxx_batch_YY)
+                batch_part = task_id.split('_batch_')[-1]  # Get the number part
+                session_batch_numbers.append(batch_part)
+        
+        # Now check batch status for each batch number
+        for batch_num in session_batch_numbers:
+            try:
+                status_key = f"batch_status:{batch_num}"
+                status = r.get(status_key)
+                if status:
+                    status = status.decode('utf-8')
+                    # Reconstruct full batch ID for display
+                    full_batch_id = f"{session_id}_batch_{batch_num}"
+                    
+                    batch_detail = {
+                        'batch_id': full_batch_id,
+                        'status': status
+                    }
+                    
+                    if status == 'iceberg_success':
+                        session_written += 1
+                        batch_detail['display_status'] = 'Written to Iceberg'
+                        batch_detail['status_type'] = 'success'
+                    elif status.startswith('retrying_'):
+                        session_retrying += 1
+                        retry_count = status.split('_')[1] if '_' in status else '?'
+                        batch_detail['display_status'] = f'Retrying ({retry_count}/3)'
+                        batch_detail['status_type'] = 'retrying'
+                    elif status == 'failed':
+                        session_failed += 1
+                        batch_detail['display_status'] = 'Write Failed'
+                        batch_detail['status_type'] = 'failed'
+                    else:
+                        session_writing += 1  # queued, processing, etc.
+                        if status == 'queued':
+                            batch_detail['display_status'] = 'Queued for Writing'
+                        elif status == 'processing':
+                            batch_detail['display_status'] = 'Writing to Iceberg'
+                        else:
+                            batch_detail['display_status'] = status.replace('_', ' ').title()
+                        batch_detail['status_type'] = 'writing'
+                    
+                    batch_details.append(batch_detail)
+            except Exception:
+                continue
+        
+        # Sort batch details by batch ID for consistent ordering
+        batch_details.sort(key=lambda x: x['batch_id'])
+        
+        return {
+            'total_queued': write_queue_len + retry_queue_len,
+            'write_queue': write_queue_len,
+            'retry_queue': retry_queue_len, 
+            'failed_queue': failed_queue_len,
+            'session_written': session_written,
+            'session_writing': session_writing,
+            'session_retrying': session_retrying,
+            'session_failed': session_failed,
+            'session_total': session_written + session_writing + session_retrying + session_failed,
+            'batch_details': batch_details  # Per-batch status information
+        }
+        
+    except Exception as e:
+        logger.warning(f"Failed to get Iceberg queue status: {e}")
+        return {
+            'total_queued': 0,
+            'write_queue': 0,
+            'retry_queue': 0,
+            'failed_queue': 0,
+            'session_written': 0,
+            'session_writing': 0,
+            'session_retrying': 0,
+            'session_failed': 0,
+            'session_total': 0,
+            'batch_details': [],
+            'error': str(e)
+        }
+
+
 def orchestrate_processing(
     directory_path: str,
     company_name: str,
@@ -364,12 +471,21 @@ def get_processing_status(session_id: str, task_ids: List[str] = None) -> Dict[s
             keys = r.keys('celery-task-meta-*')
             task_ids = []
             
+            # More specific pattern matching for task discovery
             for key in keys:
                 task_id = key.decode().replace('celery-task-meta-', '')
-                if task_id.startswith(session_id):
+                # Match both exact session_id and session_id_batch_* patterns
+                if (task_id.startswith(session_id + '_batch_') or 
+                    task_id.startswith(session_id) or
+                    (session_id in task_id and 'batch' in task_id)):
                     task_ids.append(task_id)
-                    
+            
             logger.info(f"Found {len(task_ids)} tasks in Redis for session {session_id}")
+            if task_ids:
+                logger.info(f"Sample task IDs: {task_ids[:3]}...")  # Show first 3 for debugging
+            else:
+                logger.warning(f"No tasks found for session {session_id}. Available keys sample: {[k.decode() for k in keys[:5]]}")
+                
         except Exception as e:
             logger.error(f"Failed to search Redis for tasks: {e}")
             task_ids = []
@@ -469,6 +585,18 @@ def get_processing_status(session_id: str, task_ids: List[str] = None) -> Dict[s
     # Recalculate progress percentage with actual total batches
     progress_percentage = (successful_batches / actual_total_batches * 100) if actual_total_batches > 0 else 0
     
+    # Get Iceberg queue status for session batches
+    iceberg_status = get_iceberg_queue_status(session_id)
+    
+    # Determine overall status with detailed logging for debugging
+    is_session_complete = completed + failed >= actual_total_batches
+    overall_status = 'completed' if is_session_complete else 'processing'
+    
+    # Add debug logging to help identify status issues
+    logger.info(f"Status check for {session_id}: completed={completed}, failed={failed}, "
+                f"total_batches={actual_total_batches}, is_complete={is_session_complete}, "
+                f"status='{overall_status}', iceberg_queued={iceberg_status['total_queued']}")
+    
     return {
         'session_id': session_id,
         'total_tasks': total_tasks,
@@ -480,10 +608,12 @@ def get_processing_status(session_id: str, task_ids: List[str] = None) -> Dict[s
         'successful_batches': successful_batches,  # Add this field
         'progress_percentage': round(progress_percentage, 1),
         'task_details': results,  # Return all task details
-        'overall_status': 'completed' if completed + failed >= actual_total_batches else 'processing',
+        'overall_status': overall_status,
+        'is_session_complete': is_session_complete,  # Add debug field
         'start_time': session_start_time,
         'end_time': session_end_time,
-        'duration': total_duration
+        'duration': total_duration,
+        'iceberg_status': iceberg_status  # Add Iceberg queue status
     }
 
 

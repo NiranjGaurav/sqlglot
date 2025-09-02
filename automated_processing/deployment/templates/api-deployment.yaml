@@ -25,6 +25,11 @@ spec:
               protocol: TCP
           env:
             {{- toYaml .Values.env | nindent 12 }}
+          {{- if .Values.iceberg.persistence.enabled }}
+          volumeMounts:
+            - name: iceberg-storage
+              mountPath: /app/iceberg_warehouse
+          {{- end }}
           {{- if .Values.healthCheck.enabled }}
           livenessProbe:
             httpGet:
@@ -41,3 +46,9 @@ spec:
           {{- end }}
           resources:
             {{- toYaml .Values.api.resources | nindent 12 }}
+      {{- if .Values.iceberg.persistence.enabled }}
+      volumes:
+        - name: iceberg-storage
+          persistentVolumeClaim:
+            claimName: {{ include "sqlglot-backend.fullname" . }}-iceberg-pvc
+      {{- end }}

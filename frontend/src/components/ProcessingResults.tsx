@@ -1,6 +1,6 @@
 'use client'
 
-import { useState, useEffect, useCallback } from 'react'
+import { useState, useEffect } from 'react'
 import { ProcessingStatus } from '@/types/api'
 
 interface ProcessingResultsProps {
@@ -80,7 +80,7 @@ export default function ProcessingResults({ sessionId, refreshTrigger }: Process
         <div className="text-center text-gray-500 py-8">
           <div className="text-4xl mb-2">📋</div>
           <p className="text-lg mb-2">No session selected</p>
-          <p className="text-sm">Select a session from the "Select Session" panel above to view detailed results</p>
+          <p className="text-sm">Select a session from the &quot;Select Session&quot; panel above to view detailed results</p>
         </div>
       </div>
     )
@@ -129,18 +129,84 @@ export default function ProcessingResults({ sessionId, refreshTrigger }: Process
             </div>
           </div>
 
-          {/* Progress Bar */}
-          <div className="mb-6">
-            <div className="flex justify-between text-sm text-gray-600 mb-1">
-              <span>Progress</span>
-              <span>{Math.round(status.progress_percentage || 0)}%</span>
+          {/* Progress Bars */}
+          <div className="mb-6 space-y-4">
+            {/* SQL Processing Progress */}
+            <div>
+              <div className="flex justify-between text-sm text-gray-600 mb-1">
+                <span>SQL Processing</span>
+                <span>{Math.round(status.progress_percentage || 0)}%</span>
+              </div>
+              <div className="w-full bg-gray-200 rounded-full h-4">
+                <div
+                  className="bg-blue-600 h-4 rounded-full transition-all duration-300"
+                  style={{ width: `${status.progress_percentage || 0}%` }}
+                ></div>
+              </div>
             </div>
-            <div className="w-full bg-gray-200 rounded-full h-4">
-              <div
-                className="bg-blue-600 h-4 rounded-full transition-all duration-300"
-                style={{ width: `${status.progress_percentage || 0}%` }}
-              ></div>
-            </div>
+
+            {/* Iceberg Writing Progress */}
+            {status.iceberg_status && (status.iceberg_status.session_total > 0 || status.iceberg_status.total_queued > 0) && (
+              <div>
+                <div className="flex justify-between text-sm text-gray-600 mb-1">
+                  <span>Iceberg Storage</span>
+                  <span>
+                    {status.iceberg_status.session_written} / {status.completed} written
+                    {status.iceberg_status.session_writing > 0 && (
+                      <span className="text-blue-600 ml-1">
+                        ({status.iceberg_status.session_writing} writing)
+                      </span>
+                    )}
+                    {status.iceberg_status.session_retrying > 0 && (
+                      <span className="text-yellow-600 ml-1">
+                        ({status.iceberg_status.session_retrying} retrying)
+                      </span>
+                    )}
+                  </span>
+                </div>
+                <div className="w-full bg-gray-200 rounded-full h-3">
+                  <div className="flex h-3 rounded-full overflow-hidden">
+                    {/* Written (green) */}
+                    <div
+                      className="bg-green-500 transition-all duration-300"
+                      style={{ 
+                        width: `${status.completed > 0 ? (status.iceberg_status.session_written / status.completed) * 100 : 0}%` 
+                      }}
+                    ></div>
+                    {/* Writing (blue) */}
+                    <div
+                      className="bg-blue-500 transition-all duration-300"
+                      style={{ 
+                        width: `${status.completed > 0 ? (status.iceberg_status.session_writing / status.completed) * 100 : 0}%` 
+                      }}
+                    ></div>
+                    {/* Retrying (yellow) */}
+                    <div
+                      className="bg-yellow-500 transition-all duration-300"
+                      style={{ 
+                        width: `${status.completed > 0 ? (status.iceberg_status.session_retrying / status.completed) * 100 : 0}%` 
+                      }}
+                    ></div>
+                    {/* Failed (red) */}
+                    <div
+                      className="bg-red-500 transition-all duration-300"
+                      style={{ 
+                        width: `${status.completed > 0 ? (status.iceberg_status.session_failed / status.completed) * 100 : 0}%` 
+                      }}
+                    ></div>
+                  </div>
+                </div>
+                
+                {/* Iceberg Status Summary */}
+                {status.iceberg_status.total_queued > 0 && (
+                  <div className="text-xs text-gray-500 mt-1">
+                    Queue: {status.iceberg_status.total_queued} pending 
+                    {status.iceberg_status.retry_queue > 0 && `, ${status.iceberg_status.retry_queue} retrying`}
+                    {status.iceberg_status.failed_queue > 0 && `, ${status.iceberg_status.failed_queue} in failed queue`}
+                  </div>
+                )}
+              </div>
+            )}
           </div>
 
           {/* Session Details */}
@@ -201,10 +267,38 @@ export default function ProcessingResults({ sessionId, refreshTrigger }: Process
             </div>
           </div>
 
+          {/* Per-Batch Iceberg Status */}
+          {status.iceberg_status && status.iceberg_status.batch_details && status.iceberg_status.batch_details.length > 0 && (
+            <div className="mb-6">
+              <h3 className="text-lg font-semibold text-gray-800 mb-4">Iceberg Storage Status by Batch</h3>
+              <div className="max-h-48 overflow-y-auto space-y-2 border border-gray-200 rounded-lg p-4 bg-gray-50">
+                {status.iceberg_status.batch_details.map((batch) => (
+                  <div key={batch.batch_id} className="flex justify-between items-center py-2 px-3 bg-white rounded border border-gray-100">
+                    <div className="flex items-center">
+                      <span className="text-sm font-medium text-gray-700">
+                        {batch.batch_id.replace(`${status.session_id}_batch_`, 'Batch ')}
+                      </span>
+                    </div>
+                    <div className="flex items-center">
+                      <span className={`px-3 py-1 text-xs rounded-full font-medium ${
+                        batch.status_type === 'success' ? 'bg-green-100 text-green-800' :
+                        batch.status_type === 'writing' ? 'bg-blue-100 text-blue-800' :
+                        batch.status_type === 'retrying' ? 'bg-yellow-100 text-yellow-800' :
+                        'bg-red-100 text-red-800'
+                      }`}>
+                        {batch.display_status}
+                      </span>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
           {/* All Batch Details - Full Width at Bottom */}
           <div>
             <div className="flex items-center justify-between mb-4">
-              <h3 className="text-lg font-semibold text-gray-800">All Batch Details</h3>
+              <h3 className="text-lg font-semibold text-gray-800">SQL Processing Details</h3>
               {status.task_details && (
                 <span className="text-sm text-gray-500">
                   {status.task_details.length} batches total

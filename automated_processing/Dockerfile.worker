@@ -47,7 +47,7 @@ COPY --chown=worker:worker sqlglot /app/sqlglot
 COPY --chown=worker:worker guardrail /app/guardrail
 
 # Environment setup
-ENV PYTHONPATH=/app:/app/automated_processing:$PYTHONPATH
+ENV PYTHONPATH=/app:/app/automated_processing
 ENV PATH=/home/worker/.local/bin:$PATH
 ENV PYTHONUNBUFFERED=1
 
@@ -72,8 +72,16 @@ HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
 # Use the start_worker.sh script but modify for container environment
 # In container, we don't need to start Redis (it's a separate service)
 # So we use the Celery command directly from the script
-CMD ["celery", "-A", "worker.celery", "worker", \
-     "--loglevel=info", \
-     "--pool=prefork", \
-     "--autoscale=8,1", \
-     "-Q", "processing_queue"]
+CMD ["sh", "-c", "\
+    CPU_CORES=$(nproc) && \
+    MAX_WORKERS=$((CPU_CORES)) && \
+    MIN_WORKERS=1 && \
+    echo \"Detected ${CPU_CORES} CPU cores, scaling workers: ${MIN_WORKERS}-${MAX_WORKERS}\" && \
+    celery -A worker.celery worker \
+    --loglevel=info \
+    --pool=prefork \
+    --autoscale=${MAX_WORKERS},${MIN_WORKERS} \
+    --max-tasks-per-child=50 \
+    --time-limit=7200 \
+    --soft-time-limit=6900 \
+    -Q processing_queue"]

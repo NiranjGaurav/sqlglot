@@ -173,7 +173,7 @@ export default function ParquetProcessingForm({
           <p className="text-xs text-gray-500 mt-1">
             Custom name for easier session identification
             <br />
-            <span className="text-red-500">Note: Cannot contain the word "batch"</span>
+            <span className="text-red-500">Note: Cannot contain the word &quot;batch&quot;</span>
           </p>
         </div>
 

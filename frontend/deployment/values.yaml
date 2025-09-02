@@ -24,8 +24,8 @@ resources:
 
 # Environment variables
 env:
-  - name: NEXT_PUBLIC_API_URL
-    value: "http://sqlglot-backend:8080"
+  - name: FASTAPI_BASE_URL
+    value: "http://sqlglot-backend-api:8080"
   - name: NODE_ENV
     value: "production"
 

@@ -2,6 +2,7 @@ altair==5.3.0
 attrs==23.2.0
 blinker==1.8.2
 cachetools==5.4.0
+celery[redis]==5.3.4
 certifi==2024.7.4
 charset-normalizer==3.3.2
 click==8.1.7
@@ -20,21 +21,27 @@ packaging==24.1
 pandas==2.2.2
 pillow==10.4.0
 protobuf==5.27.2
-# pyarrow==17.0.0
+pyarrow==21.0.0
+pyiceberg==0.5.1
 pydeck==0.9.1
 Pygments==2.18.0
 python-dateutil==2.9.0.post0
 pytz==2024.1
+redis==4.6.0
 referencing==0.35.1
 requests==2.32.3
 rich==13.7.1
 rpds-py==0.19.0
+s3fs==2023.12.0
+gunicorn==21.2.0
 setuptools-scm==8.1.0
 six==1.16.0
 smmap==5.0.1
+sqlalchemy==2.0.23
 sqlparse==0.5.1
 # streamlit==1.37.0
 tenacity==8.5.0
+tqdm==4.66.1
 thrift==0.21.0
 toml==0.10.2
 tomli==2.0.1
@@ -42,4 +49,5 @@ toolz==0.12.1
 tornado==6.4.2
 typing_extensions==4.12.2
 tzdata==2024.1
-urllib3==2.2.2
+urllib3==2.2.3
+uvicorn==0.24.0
