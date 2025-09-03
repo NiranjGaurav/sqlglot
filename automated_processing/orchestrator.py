@@ -1,1076 +1,401 @@
 """
-Orchestration Example: Group/Chord Pattern for Staging-Based Pipeline
-Shows how to coordinate workers and committer with staging architecture
+Simplified Orchestrator using Celery's built-in features
+No explicit Redis management needed - Celery handles it all
 """
-
 import logging
 import os
-from typing import List, Dict, Any, Optional
+import re
+from typing import Dict, Any, List, Optional
+import uuid
 from datetime import datetime
-import pytz
-from celery import group, chord
-from celery.result import AsyncResult, GroupResult
-
-# IST timezone
-IST = pytz.timezone('Asia/Kolkata')
-
-def get_ist_timestamp():
-    """Get current timestamp in Indian Standard Time"""
-    return datetime.now(IST).isoformat()
-
-# Import Celery app and tasks
-try:
-    from automated_processing.worker import celery
-    from automated_processing.worker import (
-        process_batch_to_staging_task,
-        create_staging_manifest_task_wrapper,
-        commit_session_to_iceberg_task,
-    )
-
-    CELERY_AVAILABLE = True
-except ImportError:
-    # Celery not available - monitoring will work without task status
-    celery = None
-    CELERY_AVAILABLE = False
-from .staging import get_staging_statistics, validate_staged_files
-from .iceberg_io import validate_table_schema
+import dateutil.parser
+from celery import group
+from .worker import celery as celery_app
+from .tasks import discover_parquet_files, extract_unique_queries_from_file, create_query_batch_configs
 
 logger = logging.getLogger(__name__)
 
 
-def get_redis_connection():
-    """Get Redis connection using environment variables or defaults"""
-    import redis
-
-    # Parse Redis URL from CELERY_BROKER_URL if available
-    broker_url = os.getenv("CELERY_BROKER_URL", "redis://localhost:6379/0")
-    if broker_url.startswith("redis://"):
-        # Extract host and port from URL like "redis://redis:6379/0"
-        url_parts = broker_url.replace("redis://", "").split("/")[0]
-        if ":" in url_parts:
-            host, port = url_parts.split(":")
-            port = int(port)
-        else:
-            host = url_parts
-            port = 6379
+def format_duration(seconds: float) -> str:
+    """
+    Format duration in seconds to human-readable format
+    """
+    if seconds < 60:
+        return f"{seconds:.1f}s"
+    elif seconds < 3600:
+        minutes = int(seconds // 60)
+        remaining_seconds = int(seconds % 60)
+        return f"{minutes}m {remaining_seconds}s"
     else:
-        host = "localhost"
-        port = 6379
+        hours = int(seconds // 3600)
+        minutes = int((seconds % 3600) // 60)
+        remaining_seconds = int(seconds % 60)
+        return f"{hours}h {minutes}m {remaining_seconds}s"
 
-    return redis.Redis(host=host, port=port, db=0)
 
-
-def discover_active_sessions_from_redis() -> List[str]:
+def orchestrate_processing(
+    directory_path: str,
+    company_name: str,
+    from_dialect: str,
+    to_dialect: str,
+    query_column: str,
+    batch_size: int = 10000,
+    filters: Dict[str, Any] = None,
+    name: Optional[str] = None
+) -> Dict[str, Any]:
     """
-    Discover all active sessions from Redis session metadata
-
-    Returns:
-        List of session IDs found in Redis
+    Orchestrate the entire processing pipeline using Celery with optimized file reading
+    NEW APPROACH: Read each file once in orchestrator, distribute queries to workers
+    
+    Returns immediately with task group ID that can be monitored
+    Following TestDriven.io pattern - let Celery handle all the complexity
     """
+    if name and name.strip():
+        # Use custom name with fallback to short UUID
+        clean_name = re.sub(r'[^a-zA-Z0-9_-]', '_', name.strip())  # Sanitize and limit length
+        clean_name = clean_name.strip('_')  # Remove leading/trailing underscores
+        session_id = f"session_{clean_name}_{uuid.uuid4().hex[:8]}"
+    else:
+        # Default behavior
+        session_id = f"session_{uuid.uuid4().hex[:8]}"
+    
+    logger.info(f"🚀 Starting orchestration for session {session_id}")
+    logger.info(f"📂 Processing path: {directory_path}")
+    
+    # Check if it's an S3 path
+    is_s3_path = directory_path.startswith('s3://')
+    if is_s3_path:
+        logger.info("📦 Using S3 filesystem with temporary credentials")
+    
     try:
-        import redis
-
-        r = get_redis_connection()
-        discovered_sessions = []
-
-        # Find all session metadata keys
-        session_meta_keys = r.keys("session_meta_*")
-
-        for key in session_meta_keys:
-            session_id = key.decode().replace("session_meta_", "")
-            discovered_sessions.append(session_id)
-
-        logger.info(f"🔍 Discovered {len(discovered_sessions)} sessions from Redis")
-        return discovered_sessions
-
-    except Exception as e:
-        logger.error(f"❌ Failed to discover sessions from Redis: {e}")
-        return []
-
-
-def discover_active_sessions_from_staging() -> List[str]:
-    """
-    Discover all active sessions by scanning S3 staging directory
-
-    Returns:
-        List of session IDs found in staging
-    """
-    try:
-        from .staging import get_s3_filesystem
-
-        discovered_sessions = []
-        staging_base_path = "batch-transpiler/staging/"
-
-        # Get S3 filesystem
-        s3_fs = get_s3_filesystem()
-
-        # List all directories in staging (each should be a session)
+        # Discover parquet files
+        file_paths = discover_parquet_files(
+            directory_path,
+            query_column
+        )
+        
+        if not file_paths:
+            return {
+                'error': f'No valid parquet files found in {directory_path}',
+                'session_id': session_id
+            }
+        
+        # Process all files and collect batch configs
+        all_batch_configs = []
+        
+        for file_path in file_paths:
+            file_name = os.path.basename(file_path)
+            logger.info(f"📖 Reading and processing file: {file_name}")
+            
+            # Extract unique queries from this file as PyArrow table
+            unique_table = extract_unique_queries_from_file(
+                file_path,
+                query_column,
+                filters or {}
+            )
+            
+            if len(unique_table) == 0:
+                logger.warning(f"No queries found in {file_name}")
+                continue
+            
+            logger.info(f"✅ Extracted {len(unique_table):,} unique queries from {file_name}")
+            
+            # Create batch configurations - get PyArrow table + metadata
+            batch_table, metadata = create_query_batch_configs(
+                unique_table,
+                session_id,
+                company_name,
+                from_dialect,
+                to_dialect,
+                query_column,
+                batch_size,
+                {'file_path': file_path, 'file_name': file_name}
+            )
+            
+            # Each row is a job - extract queries as Python list for JSON serialization
+            for i in range(len(batch_table)):
+                batch_id = batch_table['batch_id'][i].as_py()  # Extract batch ID
+                queries_array = batch_table['queries_array'][i].as_py()  # Extract queries as Python list
+                
+                all_batch_configs.append({
+                    'batch_id': batch_id,
+                    'queries_list': queries_array,  # Python list (JSON serializable)
+                    'metadata': metadata
+                })
+        
+        if not all_batch_configs:
+            return {
+                'error': 'No valid queries found in any files',
+                'session_id': session_id
+            }
+        
+        logger.info(f"📦 Created {len(all_batch_configs)} PyArrow jobs using table slicing")
+        
+        # Create a Celery group - each job gets one sliced PyArrow row
+        job = group(
+            celery_app.signature(
+                'process_query_batch',
+                args=[config],
+                task_id=f"{session_id}_batch_{config['batch_id']}"  # Fixed task ID generation
+            )
+            for config in all_batch_configs
+        )
+        
+        # Apply async and get the group result
+        group_result = job.apply_async()
+        
+        # Store session metadata in Redis
+        start_time = datetime.now().isoformat()
         try:
-            if s3_fs.exists(staging_base_path):
-                session_dirs = s3_fs.ls(staging_base_path, detail=False)
-
-                for session_path in session_dirs:
-                    # Extract session ID from full path
-                    session_id = session_path.split("/")[-1]
-
-                    # Filter to only include valid session IDs
-                    if session_id.startswith(("api_session_", "session_")):
-                        discovered_sessions.append(session_id)
-
-            logger.info(f"🔍 Discovered {len(discovered_sessions)} sessions from S3 staging")
-            return discovered_sessions
-
+            import redis
+            r = redis.Redis(host='localhost', port=6379, db=0)
+            session_meta_key = f"session_meta_{session_id}"
+            r.hset(session_meta_key, 'start_time', start_time)
+            r.hset(session_meta_key, 'total_batches', len(all_batch_configs))
+            r.expire(session_meta_key, 86400)  # Expire after 24 hours
         except Exception as e:
-            logger.error(f"❌ Error listing staging directories: {e}")
-            return []
-
-    except Exception as e:
-        logger.error(f"❌ Failed to discover sessions from staging: {e}")
-        return []
-
-
-def orchestrate_staging_based_processing(
-    session_id: str,
-    batches_data: List[Dict[str, Any]],
-    session_metadata: Dict[str, Any],
-    use_chord: bool = True,
-    cleanup_staging: bool = True,
-) -> Dict[str, Any]:
-    """
-    Orchestrate the complete staging-based pipeline
-
-    Pipeline Flow:
-    1. Workers process batches in parallel → stage Parquet files in S3
-    2. Manifest task collects staging results → writes manifest.json
-    3. Committer task atomically commits all staged files → Iceberg table
-    4. Optional cleanup of staging files
-
-    Args:
-        session_id: Unique session identifier
-        batches_data: List of batch configurations for workers
-        session_metadata: Overall session metadata
-        use_chord: Whether to use chord pattern (recommended)
-        cleanup_staging: Whether to clean up staging files after commit
-
-    Returns:
-        Dict with orchestration results and task IDs
-    """
-    logger.info(
-        f"🚀 Starting staging-based orchestration for session {session_id}: {len(batches_data)} batches"
-    )
-
-    if not batches_data:
+            logger.warning(f"Failed to store session metadata: {e}")
+        
+        logger.info(f"✅ Launched {len(all_batch_configs)} tasks for processing")
+        
+        # Return immediately with tracking information
         return {
-            "session_id": session_id,
-            "success": False,
-            "error": "No batches provided",
-            "total_batches": 0,
+            'session_id': session_id,
+            'group_id': group_result.id if hasattr(group_result, 'id') else session_id,
+            'status': 'processing',
+            'total_files': len(file_paths),
+            'total_batches': len(all_batch_configs),
+            'task_ids': [f"{session_id}_batch_{config['batch_id']}" for config in all_batch_configs],
+            'created_at': start_time,
+            'start_time': start_time,  # Include start time immediately
+            'configuration': {
+                'directory_path': directory_path,
+                'company_name': company_name,
+                'from_dialect': from_dialect,
+                'to_dialect': to_dialect,
+                'batch_size': batch_size
+            }
         }
-
-    orchestration_start = datetime.now()
-
-    try:
-        # Step 1: Create worker tasks (parallel processing)
-        worker_tasks = []
-        for i, batch_data in enumerate(batches_data):
-            worker_task = process_batch_to_staging_task.s(
-                session_id=session_id,
-                batch_id=i,
-                queries_list=batch_data["queries_list"],
-                metadata={**session_metadata, "batch_id": i},
-                testing=batch_data.get("testing", False),
-            )
-            worker_tasks.append(worker_task)
-
-        if use_chord:
-            # Use chord pattern: workers run in parallel, then committer runs once
-            logger.info(
-                f"📝 Using chord pattern: {len(worker_tasks)} workers → manifest → committer"
-            )
-
-            # Store session metadata in Redis for session discovery
-            try:
-                import redis
-
-                r = get_redis_connection()
-                session_meta_key = f"session_meta_{session_id}"
-                # Use IST timestamp and consistent field names with frontend expectations
-                ist_timestamp = get_ist_timestamp()
-                r.hset(session_meta_key, "start_time", ist_timestamp)
-                r.hset(session_meta_key, "created_at", ist_timestamp)  # Frontend expects this field
-                r.hset(session_meta_key, "total_batches", len(batches_data))
-                r.hset(
-                    session_meta_key,
-                    "company_name",
-                    session_metadata.get("company_name") or "unknown",
-                )
-                r.hset(session_meta_key, "session_name", session_metadata.get("session_name") or "")
-                r.hset(session_meta_key, "orchestration_type", "chord")
-                r.hset(session_meta_key, "from_dialect", session_metadata.get("from_dialect") or "")
-                r.hset(session_meta_key, "to_dialect", session_metadata.get("to_dialect") or "")
-                r.expire(session_meta_key, 172800)  # Expire after 48 hours (2 days)
-                logger.info(f"📋 Stored session metadata in Redis: {session_meta_key}")
-            except Exception as e:
-                logger.warning(f"Failed to store session metadata in Redis: {e}")
-
-            # Create chord: workers in parallel, then manifest creation
-            workers_group = group(worker_tasks)
-            # IMPORTANT: Celery chord passes worker results as the first argument to the callback
-            # The callback signature is: callback(worker_results, *args_from_signature)
-            # So we don't include worker_results in .s() - it's automatically injected
-            manifest_task = create_staging_manifest_task_wrapper.s(
-                session_id,  # This becomes session_id (2nd parameter)
-                session_metadata,  # This becomes session_metadata (3rd parameter)
-            )
-
-            # Create the committer callback with streaming commits (commit every 10 files)
-            committer_task = commit_session_to_iceberg_task.s(
-                session_id=session_id,
-                session_metadata=session_metadata,
-                cleanup_staging=cleanup_staging,
-                use_chunked_commit=False,  # Use streaming commit instead
-                chunk_size=10,  # Files per streaming chunk
-            )
-
-            # Chain: Workers → Manifest → Committer
-            chord_result = chord(workers_group)(manifest_task)
-
-            # Wait for manifest, then start committer
-            manifest_result = chord_result.get()  # This blocks until all workers complete
-
-            if manifest_result.get("ready_for_commit", False):
-                logger.info(f"✅ Manifest ready, starting committer for session {session_id}")
-                committer_result = committer_task.apply_async()
-                committer_task_id = committer_result.id
-            else:
-                logger.error(f"❌ Manifest not ready for commit: {manifest_result}")
-                return {
-                    "session_id": session_id,
-                    "success": False,
-                    "error": "Manifest creation failed",
-                    "manifest_result": manifest_result,
-                    "orchestration_duration": (
-                        datetime.now() - orchestration_start
-                    ).total_seconds(),
-                }
-
-            return {
-                "session_id": session_id,
-                "orchestration_type": "chord",
-                "total_batches": len(batches_data),
-                "workers_group_id": workers_group.id if hasattr(workers_group, "id") else None,
-                "manifest_task_id": chord_result.id,
-                "committer_task_id": committer_task_id,
-                "manifest_result": manifest_result,
-                "status": "orchestrated",
-                "orchestration_duration": (datetime.now() - orchestration_start).total_seconds(),
-                "expected_flow": "workers → manifest → committer",
-            }
-
-        else:
-            # Manual orchestration without chord
-            logger.info(f"⚙️ Using manual orchestration: {len(worker_tasks)} workers")
-
-            # Start all workers
-            workers_group = group(worker_tasks)
-            workers_result = workers_group.apply_async()
-
-            return {
-                "session_id": session_id,
-                "orchestration_type": "manual",
-                "total_batches": len(batches_data),
-                "workers_group_id": workers_result.id,
-                "status": "workers_started",
-                "orchestration_duration": (datetime.now() - orchestration_start).total_seconds(),
-                "next_steps": [
-                    "Monitor workers completion",
-                    "Call create_manifest_and_commit() when ready",
-                ],
-            }
-
+        
     except Exception as e:
-        logger.error(f"❌ Orchestration failed for session {session_id}: {str(e)}")
-
+        logger.error(f"❌ Orchestration failed: {str(e)}")
         return {
-            "session_id": session_id,
-            "success": False,
-            "error": str(e),
-            "orchestration_duration": (datetime.now() - orchestration_start).total_seconds(),
+            'error': str(e),
+            'session_id': session_id,
+            'status': 'failed'
         }
 
 
-def create_manifest_and_commit(
-    session_id: str,
-    session_metadata: Dict[str, Any],
-    worker_results: Optional[List[Dict[str, Any]]] = None,
-    cleanup_staging: bool = True,
-) -> Dict[str, Any]:
+
+def get_processing_status(session_id: str, task_ids: List[str] = None) -> Dict[str, Any]:
     """
-    Create manifest and commit staged files (for manual orchestration)
-
-    Args:
-        session_id: Session identifier
-        session_metadata: Session metadata
-        worker_results: Results from worker tasks (optional - will auto-discover if None)
-        cleanup_staging: Whether to clean up staging after commit
-
-    Returns:
-        Dict with manifest and commit results
+    Get status of processing session using Celery's AsyncResult
+    If no task_ids provided, search Redis for tasks matching session pattern
+    Special case: if session_id is 'discover_all', return all unique session IDs
     """
-    logger.info(f"📋 Creating manifest and committing session {session_id}")
-
-    try:
-        # Step 1: Get worker results (if not provided)
-        if worker_results is None:
-            # Auto-discover staged files
-            staging_stats = get_staging_statistics(session_id)
-
-            if staging_stats["total_files"] == 0:
-                return {
-                    "session_id": session_id,
-                    "success": False,
-                    "error": "No staged files found",
-                    "staging_stats": staging_stats,
-                }
-
-            # Create synthetic worker results from staging stats
-            worker_results = [
-                {"session_id": session_id, "status": "completed", "staged_file": staged_file}
-                for staged_file in staging_stats["staged_files"]
-            ]
-
-        # Step 2: Create manifest
-        manifest_task = create_staging_manifest_task_wrapper.apply_async(
-            args=[worker_results, session_id, session_metadata]
-        )
-        manifest_result = manifest_task.get()
-
-        if not manifest_result.get("ready_for_commit", False):
+    from celery.result import AsyncResult
+    import redis
+    
+    # Special case: discover all active sessions
+    if session_id == 'discover_all':
+        try:
+            r = redis.Redis(host='localhost', port=6379, db=0)
+            keys = r.keys('celery-task-meta-*')
+            discovered_sessions = set()
+            
+            for key in keys:
+                task_id = key.decode().replace('celery-task-meta-', '')
+                # Extract session ID from task ID (format: session_xxx_batch_xxx)
+                if task_id.startswith('session_'):
+                    # Split by '_batch_' to get session part
+                    parts = task_id.split('_batch_')
+                    if len(parts) >= 2:
+                        session_part = parts[0]  # Everything before '_batch_'
+                        discovered_sessions.add(session_part)
+            
+            # Also check for session metadata keys
+            session_meta_keys = r.keys('session_meta_*')
+            for key in session_meta_keys:
+                session_meta_id = key.decode().replace('session_meta_', '')
+                discovered_sessions.add(session_meta_id)
+            
+            logger.info(f"Discovered {len(discovered_sessions)} unique sessions in Redis")
             return {
-                "session_id": session_id,
-                "success": False,
-                "error": "Manifest creation failed",
-                "manifest_result": manifest_result,
+                'session_id': 'discover_all',
+                'discovered_sessions': list(discovered_sessions),
+                'total_discovered': len(discovered_sessions)
             }
-
-        # Step 3: Commit to Iceberg
-        logger.info(f"💾 Starting Iceberg commit for session {session_id}")
-
-        committer_task = commit_session_to_iceberg_task.apply_async(
-            args=[session_id, session_metadata],
-            kwargs={
-                "cleanup_staging": cleanup_staging,
-                "use_chunked_commit": False,  # Use streaming commits
-                "chunk_size": 10,  # Files per streaming chunk
-            },
-        )
-        commit_result = committer_task.get()
-
-        return {
-            "session_id": session_id,
-            "success": commit_result.get("success", False),
-            "manifest_result": manifest_result,
-            "commit_result": commit_result,
-            "committer_task_id": committer_task.id,
-            "total_duration": manifest_result.get("duration", 0)
-            + commit_result.get("total_commit_duration_seconds", 0),
+        except Exception as e:
+            logger.error(f"Failed to discover sessions from Redis: {e}")
+            return {
+                'session_id': 'discover_all',
+                'discovered_sessions': [],
+                'total_discovered': 0,
+                'error': str(e)
+            }
+    
+    if not task_ids:
+        # Search Redis for completed tasks matching session pattern
+        try:
+            r = redis.Redis(host='localhost', port=6379, db=0)
+            keys = r.keys('celery-task-meta-*')
+            task_ids = []
+            
+            for key in keys:
+                task_id = key.decode().replace('celery-task-meta-', '')
+                if task_id.startswith(session_id):
+                    task_ids.append(task_id)
+                    
+            logger.info(f"Found {len(task_ids)} tasks in Redis for session {session_id}")
+        except Exception as e:
+            logger.error(f"Failed to search Redis for tasks: {e}")
+            task_ids = []
+    
+    results = []
+    completed = 0
+    failed = 0
+    pending = 0
+    processing = 0
+    
+    # Track timing information
+    start_times = []
+    end_times = []
+    
+    for task_id in task_ids:
+        result = AsyncResult(task_id)
+        
+        task_status = {
+            'task_id': task_id,
+            'state': result.state
         }
-
-    except Exception as e:
-        logger.error(f"❌ Manual manifest and commit failed for session {session_id}: {str(e)}")
-
-        return {"session_id": session_id, "success": False, "error": str(e)}
-
-
-def get_session_metadata_from_redis(session_id: str) -> Dict[str, Any]:
-    """Get session metadata from Redis"""
+        
+        if result.state == 'PENDING':
+            pending += 1
+            task_status['status'] = 'Waiting to be processed'
+        elif result.state == 'STARTED':
+            processing += 1
+            task_status['status'] = 'Processing'
+        elif result.state == 'PROGRESS':
+            processing += 1
+            if result.info:
+                task_status.update(result.info)
+        elif result.state == 'SUCCESS':
+            completed += 1
+            task_status['status'] = 'Completed'
+            if result.result:
+                # Only include essential result info to avoid huge responses
+                if isinstance(result.result, dict):
+                    task_status['processed_count'] = result.result.get('processed_count', 0)
+                    task_status['successful_count'] = result.result.get('successful_count', 0)
+                    # Track completion time
+                    if 'completion_time' in result.result:
+                        end_times.append(result.result['completion_time'])
+        elif result.state == 'FAILURE':
+            failed += 1
+            task_status['status'] = 'Failed'
+            task_status['error'] = str(result.info)
+        
+        results.append(task_status)
+    
+    total_tasks = len(task_ids)
+    total_batches = total_tasks  # Each task represents a batch
+    successful_batches = completed  # Only count successfully completed batches
+    
+    # Calculate percentage based on successful batches vs total batches
+    progress_percentage = (successful_batches / total_batches * 100) if total_batches > 0 else 0
+    
+    # Calculate timing information and get actual total batches
+    session_start_time = None
+    session_end_time = None
+    total_duration = None
+    actual_total_batches = total_batches  # Default to calculated value
+    
+    # Try to get timing info and total batches from Redis metadata
     try:
-        import redis
-
-        # Use the same Redis connection logic as elsewhere
-        r = get_redis_connection()
-        r.decode_responses = True  # Enable decode_responses for this connection
-        # Fix: Use the same key format as used in storage (session_meta_*)
-        metadata_key = f"session_meta_{session_id}"
-        metadata = r.hgetall(metadata_key)
-        return metadata
-    except Exception as e:
-        logger.debug(f"Could not retrieve session metadata for {session_id}: {e}")
-        return {}
-
-
-def monitor_session_progress(
-    session_id: str, workers_group_id: Optional[str] = None, committer_task_id: Optional[str] = None
-) -> Dict[str, Any]:
-    """
-    Monitor the progress of a staging-based session
-
-    Args:
-        session_id: Session identifier
-        workers_group_id: Celery group ID for workers (optional)
-        committer_task_id: Celery task ID for committer (optional)
-
-    Returns:
-        Dict with current session status
-    """
-    try:
-        # Get session metadata
-        session_metadata = get_session_metadata_from_redis(session_id)
-
-        # Check if session is already completed first (to avoid unnecessary staging checks)
-        r = get_redis_connection()
+        r = redis.Redis(host='localhost', port=6379, db=0)
         session_meta_key = f"session_meta_{session_id}"
-        session_complete = False
+        session_meta = r.hgetall(session_meta_key)
         
-        # Quick check if session has committer result indicating completion
-        if r.exists(session_meta_key):
-            iceberg_commit_key = f"iceberg_commit_{session_id}"
-            if r.exists(iceberg_commit_key):
-                try:
-                    commit_data = r.hgetall(iceberg_commit_key)
-                    if commit_data.get(b"success") == b"True":
-                        session_complete = True
-                        logger.debug(f"✅ Session {session_id} already completed, skipping staging checks")
-                except Exception:
-                    pass
+        if session_meta:
+            if b'start_time' in session_meta:
+                session_start_time = session_meta[b'start_time'].decode()
+            if b'end_time' in session_meta:
+                session_end_time = session_meta[b'end_time'].decode()
+            if b'total_batches' in session_meta:
+                actual_total_batches = int(session_meta[b'total_batches'].decode())
         
-        # Get staging statistics only if session is not completed
-        if session_complete:
-            staging_stats = {
-                "session_id": session_id,
-                "total_files": 0,
-                "staging_complete": True,
-                "manifest_exists": True,
-                "session_completed": True
-            }
-        else:
-            staging_stats = get_staging_statistics(session_id)
-
-        # Check worker group status (only if Celery is available and we have group_id)
-        workers_status = {"status": "unknown"}
-        if workers_group_id and CELERY_AVAILABLE and celery:
+        # If session is completed and no end time recorded, set it now
+        if (completed + failed >= actual_total_batches) and session_start_time and not session_end_time:
+            session_end_time = datetime.now().isoformat()
+            r.hset(session_meta_key, 'end_time', session_end_time)
+            r.expire(session_meta_key, 86400)  # Expire after 24 hours
+        
+        # Calculate duration if we have both times
+        if session_start_time and session_end_time:
             try:
-                group_result = GroupResult.restore(workers_group_id, backend=celery.backend)
-                if group_result:
-                    workers_status = {
-                        "status": "completed" if group_result.ready() else "running",
-                        "completed_tasks": group_result.completed_count(),
-                        "total_tasks": len(group_result),
-                        "successful_tasks": group_result.successful()
-                        if group_result.ready()
-                        else 0,
-                        "failed_tasks": group_result.failed() if group_result.ready() else 0,
-                    }
+                start_dt = dateutil.parser.parse(session_start_time)
+                end_dt = dateutil.parser.parse(session_end_time)
+                duration_seconds = (end_dt - start_dt).total_seconds()
+                total_duration = format_duration(duration_seconds)
             except Exception as e:
-                workers_status = {"status": "error", "error": str(e)}
-
-        # If we don't have Celery task tracking, use Redis metadata fallback
-        if workers_status["status"] == "unknown":
-            # Fallback: Estimate worker status based on staging files and Redis metadata
-            try:
-                import redis
-
-                r = get_redis_connection()
-                session_meta_key = f"session_meta_{session_id}"
-
-                logger.info(
-                    f"🔍 Inferring worker status for {session_id}: Redis key exists = {r.exists(session_meta_key)}"
-                )
-                if r.exists(session_meta_key):
-                    # Get total expected batches from Redis metadata
-                    expected_batches = r.hget(session_meta_key, "total_batches")
-                    if expected_batches:
-                        expected_batches = int(expected_batches)
-                        current_files = staging_stats.get("total_files", 0)
-
-                        if current_files == 0:
-                            # No files yet - just started or completed and cleaned
-                            if staging_stats.get("staging_complete"):
-                                workers_status = {
-                                    "status": "completed",
-                                    "inferred": True,
-                                    "files_cleaned": True,
-                                }
-                            else:
-                                workers_status = {
-                                    "status": "processing",
-                                    "inferred": True,
-                                    "completed_tasks": 0,
-                                    "total_tasks": expected_batches,
-                                }
-                        elif current_files > 0:
-                            if staging_stats.get("staging_complete"):
-                                # All files present and staging complete
-                                workers_status = {
-                                    "status": "completed",
-                                    "inferred": True,
-                                    "completed_tasks": expected_batches,
-                                    "total_tasks": expected_batches,
-                                    "successful_tasks": expected_batches,
-                                    "failed_tasks": 0,
-                                }
-                            else:
-                                # Still processing - estimate progress from file count
-                                workers_status = {
-                                    "status": "running"
-                                    if current_files < expected_batches
-                                    else "completed",
-                                    "inferred": True,
-                                    "completed_tasks": current_files,
-                                    "total_tasks": expected_batches,
-                                    "successful_tasks": current_files,
-                                    "failed_tasks": 0,
-                                }
-                        else:
-                            workers_status = {"status": "unknown", "inferred": True}
-                    else:
-                        workers_status = {"status": "unknown", "inferred": True}
-                else:
-                    workers_status = {"status": "unknown", "inferred": True}
-            except Exception as e:
-                logger.debug(f"Could not infer worker status from Redis for {session_id}: {e}")
-                workers_status = {"status": "unknown", "inferred": True}
-
-        # Check committer status (only if Celery is available)
-        committer_status = {"status": "not_started"}
-        if committer_task_id and CELERY_AVAILABLE and celery:
-            try:
-                committer_result = AsyncResult(committer_task_id, backend=celery.backend)
-                committer_status = {
-                    "status": committer_result.status,
-                    "result": committer_result.result if committer_result.ready() else None,
-                }
-
-                # Extract validation results from successful committer result
-                if (
-                    committer_result.ready()
-                    and committer_result.successful()
-                    and committer_result.result
-                    and committer_result.result.get("validation_results")
-                ):
-                    validation_result = committer_result.result["validation_results"]
-            except Exception as e:
-                committer_status = {"status": "error", "error": str(e)}
-
-        # Only validate staged files for non-completed sessions
-        # Skip validation if session is completed to avoid checking deleted files
-        validation_result = None
-        overall_status = _determine_overall_status(workers_status, committer_status, staging_stats)
-
-        # Special case: If workers completed but no files remain, check manifest for completion
-        if overall_status == "workers_completed_no_files":
-            try:
-                from .staging import read_staging_manifest
-
-                manifest = read_staging_manifest(session_id)
-                if manifest and manifest.get("iceberg_commit"):
-                    # Manifest has commit info - session actually completed
-                    overall_status = "completed"
-                elif manifest and manifest.get("staging_complete"):
-                    # FALLBACK: If manifest exists and staging was completed,
-                    # but no iceberg_commit data, assume it completed successfully
-                    # (this handles cases where commit succeeded but manifest wasn't updated)
-                    overall_status = "completed"
-            except Exception as e:
-                logger.debug(f"Could not check manifest for session {session_id}: {e}")
-
-        # Additional check: if manifest shows successful completion but overall status is still unknown
-        if overall_status == "unknown":
-            logger.info(f"🔍 Checking manifest for completion detection for session {session_id}")
-            try:
-                from .staging import read_staging_manifest
-
-                manifest = read_staging_manifest(session_id)
-                logger.info(
-                    f"📋 Manifest exists: {manifest is not None}, staging_complete: {manifest.get('staging_complete') if manifest else None}"
-                )
-
-                if manifest and manifest.get("staging_complete"):
-                    # Check for nested metadata structure
-                    metadata = manifest.get("metadata", {})
-                    logger.info(
-                        f"📊 Metadata keys: {list(metadata.keys()) if metadata else 'None'}"
-                    )
-
-                    if "metadata" in metadata:
-                        # Use nested metadata if it exists
-                        nested_metadata = metadata["metadata"]
-                        successful_batches = nested_metadata.get("successful_batches", 0)
-                        failed_batches_count = nested_metadata.get("failed_batches_count", 0)
-                        total_files = metadata.get(
-                            "total_files", nested_metadata.get("total_files", 0)
-                        )
-                        logger.info(
-                            f"📈 Using nested metadata: successful_batches={successful_batches}, failed_batches_count={failed_batches_count}"
-                        )
-                    else:
-                        # Use direct metadata
-                        successful_batches = metadata.get("successful_batches", 0)
-                        failed_batches_count = metadata.get("failed_batches_count", 0)
-                        total_files = metadata.get("total_files", 0)
-                        logger.info(
-                            f"📈 Using direct metadata: successful_batches={successful_batches}, failed_batches_count={failed_batches_count}"
-                        )
-
-                    logger.info(
-                        f"🧮 Condition check: successful_batches > 0 = {successful_batches > 0}, failed_batches_count == 0 = {failed_batches_count == 0}"
-                    )
-                    if successful_batches > 0 and failed_batches_count == 0:
-                        # All batches successful and staging complete - likely completed
-                        overall_status = "completed"
-                        workers_status["status"] = "completed"
-                        workers_status["completed_tasks"] = successful_batches
-                        workers_status["total_tasks"] = successful_batches
-                        workers_status["successful_tasks"] = successful_batches
-                        workers_status["failed_tasks"] = failed_batches_count
-
-                        # Also update committer status to show SUCCESS with manifest data
-                        # Check possible locations for iceberg_commit data
-                        iceberg_commit = manifest.get("iceberg_commit", {})
-                        if not iceberg_commit:
-                            iceberg_commit = metadata.get("iceberg_commit", {})
-                        if not iceberg_commit and "metadata" in metadata:
-                            iceberg_commit = metadata["metadata"].get("iceberg_commit", {})
-
-                        logger.info(
-                            f"💾 Iceberg commit data found: {iceberg_commit is not None and len(iceberg_commit) > 0}"
-                        )
-                        if iceberg_commit:
-                            committer_status = {
-                                "status": "SUCCESS",
-                                "result": {
-                                    "session_id": session_id,
-                                    "success": True,
-                                    "committed_files": iceberg_commit.get("committed_files", 0),
-                                    "total_rows": iceberg_commit.get("total_rows", 0),
-                                    "commit_duration_seconds": iceberg_commit.get(
-                                        "commit_duration_seconds", 0
-                                    ),
-                                    "total_commit_duration_seconds": iceberg_commit.get(
-                                        "commit_duration_seconds", 0
-                                    ),
-                                    "commit_type": "streaming",
-                                    "cleanup_success": iceberg_commit.get("cleanup_success", True),
-                                },
-                            }
-
-                        # Update staging stats to show the original file count
-                        staging_stats["total_files"] = total_files
-                        staging_stats["total_size_mb"] = 0  # Files cleaned up, size unknown
-
-                        logger.info(
-                            f"✅ Detected completed session {session_id} from manifest metadata: {successful_batches} batches, {iceberg_commit.get('total_rows', 0)} rows"
-                        )
-            except Exception as e:
-                logger.debug(f"Could not check manifest metadata for session {session_id}: {e}")
-
-        # Auto-trigger committer if staging is ready but committer hasn't started
-        # BUT first check if session is actually already completed (files cleaned up)
-        if (
-            overall_status == "staged_ready_for_commit"
-            and committer_status.get("status") == "not_started"
-            and CELERY_AVAILABLE
-            and celery
-        ):
-            # SAFETY CHECK: Before auto-triggering, verify the session isn't already completed
-            # Check if manifest shows iceberg_commit data (indicating completion)
-            try:
-                from .staging import read_staging_manifest
-
-                manifest = read_staging_manifest(session_id)
-                if manifest and manifest.get("iceberg_commit"):
-                    logger.info(
-                        f"🛑 Session {session_id} already completed - skipping auto-trigger (manifest has commit data)"
-                    )
-                elif manifest and manifest.get("metadata", {}).get("iceberg_commit"):
-                    logger.info(
-                        f"🛑 Session {session_id} already completed - skipping auto-trigger (nested commit data)"
-                    )
-                else:
-                    # Safe to proceed with auto-trigger
-                    logger.info(f"🚀 Auto-triggering committer for ready session {session_id}")
-                    from automated_processing.worker import commit_session_to_iceberg_task
-
-                    # Get session metadata from Redis if available
-                    try:
-                        import redis
-
-                        r = get_redis_connection()
-                        session_meta_key = f"session_meta_{session_id}"
-                        if r.exists(session_meta_key):
-                            session_metadata = {
-                                "company_name": r.hget(session_meta_key, "company_name").decode()
-                                if r.hget(session_meta_key, "company_name")
-                                else "auto_commit",
-                                "from_dialect": r.hget(session_meta_key, "from_dialect").decode()
-                                if r.hget(session_meta_key, "from_dialect")
-                                else "",
-                                "to_dialect": r.hget(session_meta_key, "to_dialect").decode()
-                                if r.hget(session_meta_key, "to_dialect")
-                                else "",
-                            }
-                        else:
-                            session_metadata = {"company_name": "auto_commit"}
-                    except:
-                        session_metadata = {"company_name": "auto_commit"}
-
-                    # Trigger committer task
-                    committer_task = commit_session_to_iceberg_task.apply_async(
-                        args=[session_id, session_metadata],
-                        kwargs={
-                            "cleanup_staging": True,
-                            "use_chunked_commit": False,
-                            "chunk_size": 10,
-                        },
-                    )
-
-                    # Update committer status
-                    committer_status = {
-                        "status": "PENDING",
-                        "auto_triggered": True,
-                        "task_id": committer_task.id,
-                    }
-                    overall_status = "committing"
-
-                    logger.info(
-                        f"✅ Auto-triggered committer task {committer_task.id} for session {session_id}"
-                    )
-
-            except Exception as e:
-                logger.error(f"❌ Failed to auto-trigger committer for session {session_id}: {e}")
-
-        if staging_stats["total_files"] > 0 and overall_status not in ["completed", "failed"]:
-            try:
-                validation_result = validate_staged_files(session_id)
-
-                # CRITICAL: Check if all files are cleaned up (detected after validation)
-                if (
-                    overall_status == "unknown"
-                    and validation_result
-                    and validation_result.get("valid_files", 0) == 0
-                    and validation_result.get("invalid_files", 0) > 0
-                ):
-                    all_key_not_exist = all(
-                        "does not exist" in str(error.get("error", "")).lower()
-                        for error in validation_result.get("errors", [])
-                    )
-                    if all_key_not_exist:
-                        logger.info(
-                            f"✅ Detected completed session {session_id} - all {validation_result['invalid_files']} files were cleaned up after commit"
-                        )
-                        overall_status = "completed"
-                        workers_status["status"] = "completed"
-                        workers_status["files_cleaned"] = True
-
-                        # Try to get actual row count from manifest or Redis
-                        total_rows = 0
-                        try:
-                            from .staging import read_staging_manifest
-
-                            manifest = read_staging_manifest(session_id)
-                            if manifest and manifest.get("iceberg_commit", {}).get("total_rows"):
-                                total_rows = manifest["iceberg_commit"]["total_rows"]
-                            else:
-                                # Fallback: try to get from Redis committer results
-                                import redis
-
-                                r = get_redis_connection()
-                                committer_key_pattern = f"celery-task-meta-*"
-                                for key in r.scan_iter(match=committer_key_pattern):
-                                    try:
-                                        task_data = r.get(key)
-                                        if task_data:
-                                            import json
-
-                                            task_result = json.loads(task_data)
-                                            if task_result.get("result", {}).get(
-                                                "session_id"
-                                            ) == session_id and task_result.get("result", {}).get(
-                                                "total_rows"
-                                            ):
-                                                total_rows = task_result["result"]["total_rows"]
-                                                break
-                                    except Exception:
-                                        continue
-                        except Exception as e:
-                            logger.debug(f"Could not get actual row count for {session_id}: {e}")
-                            total_rows = 0  # Fallback to 0 if we can't determine
-
-                        # Create synthetic committer status with actual data
-                        committer_status = {
-                            "status": "SUCCESS",
-                            "result": {
-                                "session_id": session_id,
-                                "success": True,
-                                "committed_files": staging_stats.get("total_files", 0),
-                                "total_rows": total_rows,
-                                "commit_duration_seconds": 287.9,  # Generic estimate
-                                "total_commit_duration_seconds": 485.4,  # Generic estimate
-                                "commit_type": "streaming",
-                                "cleanup_success": True,
-                            },
-                        }
-
-                        # Update validation result for completed session
-                        # Try to get validation results from committer first
-                        if iceberg_commit.get("validation_results"):
-                            validation_result = iceberg_commit["validation_results"]
-                        else:
-                            validation_result = {
-                                "session_id": session_id,
-                                "skipped": True,
-                                "reason": "Session completed, files cleaned up",
-                                "is_valid": True,  # Assume valid since it completed successfully
-                            }
-
-            except Exception as e:
-                validation_result = {"error": str(e)}
-        elif overall_status == "completed":
-            # For completed sessions, skip validation since files are cleaned up
-            validation_result = {
-                "session_id": session_id,
-                "skipped": True,
-                "reason": "Session completed, files cleaned up",
-                "is_valid": True,  # Assume valid since it completed successfully
-            }
-
-        # Final check: If session is completed, update status from manifest data
-        if overall_status == "completed":
-            try:
-                from .staging import read_staging_manifest
-
-                manifest = read_staging_manifest(session_id)
-                if manifest and manifest.get("metadata"):
-                    metadata = manifest["metadata"]
-
-                    # Update committer status if not already set
-                    if committer_status.get("status") == "not_started" and metadata.get(
-                        "iceberg_commit"
-                    ):
-                        iceberg_commit = metadata["iceberg_commit"]
-                        committer_status = {
-                            "status": "SUCCESS",
-                            "result": {
-                                "session_id": session_id,
-                                "success": True,
-                                "committed_files": iceberg_commit.get("committed_files", 0),
-                                "total_rows": iceberg_commit.get("total_rows", 0),
-                                "commit_duration_seconds": iceberg_commit.get(
-                                    "commit_duration_seconds", 0
-                                ),
-                                "total_commit_duration_seconds": iceberg_commit.get(
-                                    "commit_duration_seconds", 0
-                                ),
-                                "commit_type": "streaming",
-                                "cleanup_success": iceberg_commit.get("cleanup_performed", True),
-                                "committed_at": iceberg_commit.get("committed_at"),
-                            },
-                        }
-
-                    # Update worker status from manifest if showing 0s
-                    if workers_status.get("completed_tasks", 0) == 0 and "metadata" in metadata:
-                        nested_metadata = metadata["metadata"]
-                        successful_batches = nested_metadata.get("successful_batches", 0)
-                        if successful_batches > 0:
-                            workers_status.update(
-                                {
-                                    "status": "completed",
-                                    "completed_tasks": successful_batches,
-                                    "total_tasks": successful_batches,
-                                    "successful_tasks": successful_batches,
-                                    "failed_tasks": nested_metadata.get("failed_batches_count", 0),
-                                    "inferred": True,
-                                }
-                            )
-
-                    # Update staging stats to show original file count and size from manifest
-                    if staging_stats.get("total_files", 0) == 0:
-                        original_files = metadata.get("total_files", 0)
-                        if original_files > 0:
-                            staging_stats["total_files"] = original_files
-
-                            # Estimate original size based on committed rows and typical Parquet compression
-                            # Typical Parquet file: ~1KB per 100-200 rows depending on data complexity
-                            if "metadata" in metadata:
-                                nested_metadata = metadata["metadata"]
-                                total_queries = nested_metadata.get("total_queries_processed", 0)
-                                if total_queries > 0:
-                                    # Estimate: 1MB per 100,000 rows (conservative estimate for SQL query data)
-                                    estimated_size_mb = max(1.0, total_queries / 100000.0)
-                                    staging_stats["total_size_mb"] = estimated_size_mb
-                                    staging_stats["total_size_bytes"] = int(
-                                        estimated_size_mb * 1024 * 1024
-                                    )
-
-                    logger.info(
-                        f"✅ Updated session details from manifest for completed session {session_id}"
-                    )
-            except Exception as e:
-                logger.debug(
-                    f"Could not update session details from manifest for {session_id}: {e}"
-                )
-
-        return {
-            "session_id": session_id,
-            "session_name": session_metadata.get("session_name"),
-            "timestamp": get_ist_timestamp(),
-            "staging_stats": staging_stats,
-            "workers_status": workers_status,
-            "committer_status": committer_status,
-            "validation_result": validation_result,
-            "overall_status": overall_status,
-        }
-
+                logger.warning(f"Failed to calculate duration: {e}")
+                
     except Exception as e:
-        logger.error(f"❌ Failed to monitor session {session_id}: {str(e)}")
-
-        return {
-            "session_id": session_id,
-            "status": "monitoring_error",
-            "error": str(e),
-            "timestamp": get_ist_timestamp(),
-        }
-
-
-def _determine_overall_status(
-    workers_status: Dict, committer_status: Dict, staging_stats: Dict
-) -> str:
-    """Determine overall session status from component statuses"""
-
-    # Check committer first (final stage)
-    if committer_status["status"] == "SUCCESS":
-        return "completed"
-    elif committer_status["status"] in ["FAILURE", "REVOKED"]:
-        return "failed"
-    elif committer_status["status"] in ["PENDING", "STARTED", "RETRY"]:
-        return "committing"
-
-    # Check workers
-    if workers_status["status"] == "completed":
-        if staging_stats.get("total_files", 0) > 0:
-            return "staged_ready_for_commit"
-        else:
-            # IMPORTANT: If workers completed but no staging files remain,
-            # this likely means the session completed successfully and files were cleaned up
-            # Check if manifest has commit information to confirm completion
-            return "workers_completed_no_files"  # Will be checked further in monitor function
-    elif workers_status["status"] in ["running", "processing"]:
-        return "processing"
-    elif workers_status["status"] in ["failed", "error"]:
-        return "failed"
-
-    # Default
-    return "unknown"
-
-
-def cleanup_failed_session(session_id: str, keep_logs: bool = True) -> Dict[str, Any]:
-    """
-    Clean up staging files for a failed session
-
-    Args:
-        session_id: Session identifier
-        keep_logs: Whether to keep manifest.json for debugging
-
-    Returns:
-        Dict with cleanup results
-    """
-    logger.info(f"🧹 Cleaning up failed session {session_id}")
-
-    try:
-        from staging import cleanup_staging_files
-
-        # Get staging stats before cleanup
-        staging_stats = get_staging_statistics(session_id)
-
-        if staging_stats["total_files"] == 0:
-            return {
-                "session_id": session_id,
-                "cleanup_needed": False,
-                "message": "No staged files to clean up",
-            }
-
-        # Perform cleanup
-        cleanup_success = cleanup_staging_files(session_id=session_id, keep_manifest=keep_logs)
-
-        return {
-            "session_id": session_id,
-            "cleanup_needed": True,
-            "cleanup_success": cleanup_success,
-            "files_before_cleanup": staging_stats["total_files"],
-            "size_before_cleanup_mb": staging_stats["total_size_mb"],
-            "manifest_preserved": keep_logs,
-        }
-
-    except Exception as e:
-        logger.error(f"❌ Failed to clean up session {session_id}: {str(e)}")
-
-        return {"session_id": session_id, "cleanup_success": False, "error": str(e)}
-
-
-# Example usage functions
-def example_simple_session():
-    """Example: Simple session with 3 batches"""
-
-    session_id = f"example_session_{int(datetime.now().timestamp())}"
-
-    # Sample batch data
-    batches_data = [
-        {"queries_list": ["SELECT 1", "SELECT 2"], "testing": False},
-        {"queries_list": ["SELECT 3", "SELECT 4"], "testing": False},
-        {"queries_list": ["SELECT 5"], "testing": False},
-    ]
-
-    session_metadata = {
-        "company_name": "example_company",
-        "from_dialect": "snowflake",
-        "to_dialect": "e6",
-        "created_at": datetime.now().isoformat(),
+        logger.warning(f"Failed to get session timing info: {e}")
+    
+    # Recalculate progress percentage with actual total batches
+    progress_percentage = (successful_batches / actual_total_batches * 100) if actual_total_batches > 0 else 0
+    
+    return {
+        'session_id': session_id,
+        'total_tasks': total_tasks,
+        'total_batches': actual_total_batches,  # Use actual total batches from Redis
+        'completed': completed,
+        'failed': failed,
+        'pending': pending,
+        'processing': processing,
+        'successful_batches': successful_batches,  # Add this field
+        'progress_percentage': round(progress_percentage, 1),
+        'task_details': results,  # Return all task details
+        'overall_status': 'completed' if completed + failed >= actual_total_batches else 'processing',
+        'start_time': session_start_time,
+        'end_time': session_end_time,
+        'duration': total_duration
     }
 
-    # Start orchestration
-    result = orchestrate_staging_based_processing(
-        session_id=session_id,
-        batches_data=batches_data,
-        session_metadata=session_metadata,
-        use_chord=True,
-        cleanup_staging=True,
-    )
 
-    print(f"Orchestration started for session {session_id}")
-    print(f"Result: {result}")
-
-    return result
-
-
-def example_monitor_session(
-    session_id: str, workers_group_id: str = None, committer_task_id: str = None
-):
-    """Example: Monitor session progress"""
-
-    status = monitor_session_progress(
-        session_id=session_id,
-        workers_group_id=workers_group_id,
-        committer_task_id=committer_task_id,
-    )
-
-    print(f"Session {session_id} status:")
-    print(f"Overall: {status['overall_status']}")
-    print(f"Staged files: {status['staging_stats']['total_files']}")
-    print(f"Workers: {status['workers_status']['status']}")
-    print(f"Committer: {status['committer_status']['status']}")
-
-    return status
-
-
-if __name__ == "__main__":
-    # Run example
-    print("Starting staging-based pipeline example...")
-    result = example_simple_session()
-
-    if result.get("committer_task_id"):
-        print(f"\nMonitoring session {result['session_id']}...")
-        status = example_monitor_session(
-            session_id=result["session_id"],
-            workers_group_id=result.get("workers_group_id"),
-            committer_task_id=result.get("committer_task_id"),
-        )
+def get_task_result(task_id: str) -> Dict[str, Any]:
+    """
+    Get result of a specific task using Celery's AsyncResult
+    """
+    from celery.result import AsyncResult
+    
+    result = AsyncResult(task_id)
+    
+    response = {
+        'task_id': task_id,
+        'state': result.state,
+        'ready': result.ready()
+    }
+    
+    if result.state == 'PENDING':
+        response['status'] = 'Task is waiting to be processed'
+    elif result.state == 'STARTED':
+        response['status'] = 'Task has started processing'
+    elif result.state == 'PROGRESS':
+        response['status'] = 'Task is in progress'
+        if result.info:
+            response['progress'] = result.info
+    elif result.state == 'SUCCESS':
+        response['status'] = 'Task completed successfully'
+        response['result'] = result.result
+    elif result.state == 'FAILURE':
+        response['status'] = 'Task failed'
+        response['error'] = str(result.info)
+        response['traceback'] = result.traceback
+    elif result.state == 'RETRY':
+        response['status'] = 'Task is being retried'
+    else:
+        response['status'] = f'Unknown state: {result.state}'
+    
+    return response
