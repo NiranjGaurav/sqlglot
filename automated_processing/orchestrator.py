@@ -4,21 +4,14 @@ No explicit Redis management needed - Celery handles it all
 """
 import logging
 import os
-from typing import Dict, Any, List, Optional
-from pathlib import Path
-import uuid
-import hashlib
 import re
-import numpy as np
+from typing import Dict, Any, List, Optional
+import uuid
 from datetime import datetime
 import dateutil.parser
-from celery import group, chord, signature
+from celery import group
 from .worker import celery as celery_app
 from .tasks import discover_parquet_files, extract_unique_queries_from_file, create_query_batch_configs
-import pyarrow as pa
-import pyarrow.parquet as pq
-import pyarrow.compute as pc
-import s3fs
 
 logger = logging.getLogger(__name__)
 
@@ -61,10 +54,6 @@ def orchestrate_processing(
         # Use custom name with fallback to short UUID
         clean_name = re.sub(r'[^a-zA-Z0-9_-]', '_', name.strip())  # Sanitize and limit length
         clean_name = clean_name.strip('_')  # Remove leading/trailing underscores
-        # if clean_name and not clean_name[0].isalnum():  # Ensure it starts with alphanumeric
-        #     clean_name = 'n_' + clean_name
-        # if not clean_name:  # Fallback if name becomes empty after cleaning
-        #     clean_name = 'custom'
         session_id = f"session_{clean_name}_{uuid.uuid4().hex[:8]}"
     else:
         # Default behavior
@@ -196,118 +185,6 @@ def orchestrate_processing(
             'status': 'failed'
         }
 
-
-# def create_query_batch_configs(
-#     unique_table: pa.Table,
-#     session_id: str,
-#     company_name: str,
-#     from_dialect: str,
-#     to_dialect: str,
-#     query_column: str,
-#     batch_size: int,
-#     file_config: Dict[str, Any]
-# ) -> List[Dict[str, Any]]:
-#     """
-#     Create batch configurations with PyArrow table (optimized for memory and speed)
-#     Uses hash-based distribution for consistent batching with vectorized operations
-#     """
-#     if len(unique_table) == 0:
-#         return []
-    
-#     # Calculate number of batches needed
-#     num_queries = len(unique_table)
-#     num_batches = max(1, (num_queries + batch_size - 1) // batch_size)
-    
-#     # SHA-256 hash-based distribution using Python hashlib (universally available)
-#     # Convert queries to Python list for hashing
-#     query_list = unique_table[query_column].to_pylist()
-    
-#     # Use SHA-256 for consistent hash distribution
-#     hash_values = []
-#     for query in query_list:
-#         # Create SHA-256 hash of query string
-#         hash_obj = hashlib.sha256(query.encode('utf-8'))
-#         # Convert first 8 bytes to integer for batch assignment
-#         hash_int = int.from_bytes(hash_obj.digest()[:8], 'big')
-#         batch_id = hash_int % num_batches
-#         hash_values.append(batch_id)
-    
-#     # Convert back to PyArrow array
-#     batch_ids = pa.array(hash_values, type=pa.int32())
-    
-#     # Add batch_id column to table
-#     table_with_batch = unique_table.append_column('batch_id', batch_ids)
-    
-#     # Create configurations using PyArrow operations (eliminate Python lists)
-#     # Get unique batch IDs that actually have data
-#     unique_batch_ids = pc.unique(table_with_batch['batch_id'])
-#     num_actual_batches = len(unique_batch_ids)
-    
-#     # Create batch config table using PyArrow operations
-#     batch_config_data = {
-#         'batch_id': [],
-#         'session_id': [],
-#         'file_name': [],
-#         'batch_idx': [],
-#         'total_batches': [],
-#         'company_name': [],
-#         'from_dialect': [],
-#         'to_dialect': [],
-#         'query_column': [],
-#         'queries_table': [],
-#         'query_count': []
-#     }
-    
-#     # Process each batch using vectorized operations
-#     for batch_idx_scalar in unique_batch_ids.to_pylist():  # Only convert scalars
-#         batch_idx = int(batch_idx_scalar)
-        
-#         # Filter table for this batch (vectorized)
-#         batch_mask = pc.equal(table_with_batch['batch_id'], batch_idx)
-#         batch_table = table_with_batch.filter(batch_mask)
-        
-#         if len(batch_table) == 0:  # Skip empty batches
-#             continue
-        
-#         # Remove the batch_id column before storing
-#         batch_queries_table = batch_table.select([query_column])
-        
-#         # Convert PyArrow table to serializable format for Celery
-#         queries_list = batch_queries_table[query_column].to_pylist()
-        
-#         # Collect batch config data (convert to serializable format)
-#         batch_config_data['batch_id'].append(f"batch_{session_id}_{batch_idx}")
-#         batch_config_data['session_id'].append(session_id)
-#         batch_config_data['file_name'].append(file_config['file_name'])
-#         batch_config_data['batch_idx'].append(batch_idx)
-#         batch_config_data['total_batches'].append(num_batches)
-#         batch_config_data['company_name'].append(company_name)
-#         batch_config_data['from_dialect'].append(from_dialect)
-#         batch_config_data['to_dialect'].append(to_dialect)
-#         batch_config_data['query_column'].append(query_column)
-#         batch_config_data['queries_table'].append(queries_list)  # Convert to Python list for serialization
-#         batch_config_data['query_count'].append(len(queries_list))
-    
-#     # Convert to list of dicts (needed for Celery serialization)
-#     batch_configs = []
-#     for i in range(len(batch_config_data['batch_id'])):
-#         batch_config = {
-#             'batch_id': batch_config_data['batch_id'][i],
-#             'session_id': batch_config_data['session_id'][i],
-#             'file_name': batch_config_data['file_name'][i],
-#             'batch_idx': batch_config_data['batch_idx'][i],
-#             'total_batches': batch_config_data['total_batches'][i],
-#             'company_name': batch_config_data['company_name'][i],
-#             'from_dialect': batch_config_data['from_dialect'][i],
-#             'to_dialect': batch_config_data['to_dialect'][i],
-#             'query_column': batch_config_data['query_column'][i],
-#             'queries_table': batch_config_data['queries_table'][i],  # Python list now
-#             'query_count': batch_config_data['query_count'][i]
-#         }
-#         batch_configs.append(batch_config)
-    
-#     logger.info(f"Created {len(batch_configs)} batches from {num_queries} queries using vectorized operations")
-#     return batch_configs
 
 
 def get_processing_status(session_id: str, task_ids: List[str] = None) -> Dict[str, Any]:
