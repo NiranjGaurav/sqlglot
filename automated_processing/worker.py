@@ -4,15 +4,12 @@ Following patterns from TestDriven.io FastAPI+Celery guide
 Run with: celery -A worker.celery worker --loglevel=info
 """
 from celery import Celery
-import pyarrow as pa
-import pyarrow.compute as pc
 import logging
 import sys
 import os
 from datetime import datetime
 from typing import Dict, Any
 from tqdm import tqdm
-import iceberg_handler as ih
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -28,7 +25,7 @@ celery = Celery(
     backend=CELERY_RESULT_BACKEND
 )
 
-# Configure Celery for optimal autoscaling
+# Configure Celery for optimal autoscaling with staging-based architecture
 celery.conf.update(
     task_serializer='json',
     accept_content=['json'],
@@ -44,9 +41,17 @@ celery.conf.update(
     worker_max_tasks_per_child=5, # Restart workers after 5 tasks (prevent S3 memory issues)
     worker_disable_rate_limits=True, # Better performance for CPU-bound tasks
     result_expires=86400,
+    # Updated task routing for staging architecture
     task_routes={
+        # Worker tasks (parallel processing)
         'process_batch': {'queue': 'processing_queue'},
-        'process_query_batch': {'queue': 'processing_queue'}
+        'process_query_batch': {'queue': 'processing_queue'},
+        'process_batch_to_staging': {'queue': 'processing_queue'},
+        'create_staging_manifest': {'queue': 'processing_queue'},
+        # Committer tasks (single-threaded)
+        'commit_session_to_iceberg': {'queue': 'iceberg_commit'},
+        'retry_failed_commit': {'queue': 'iceberg_commit'},
+        'commit_multiple_sessions': {'queue': 'iceberg_commit'}
     }
 )
 
@@ -63,7 +68,13 @@ def process_query_batch(self, job_config: Dict[str, Any]) -> Dict[str, Any]:
     Consolidated function - Process PyArrow table of queries using vectorized operations
     Handles new PyArrow job format where each job gets one batch row
     """
+    # Import PyArrow packages inside the task
+    import pyarrow as pa
+    import pyarrow.compute as pc
     from automated_processing.statistics import analyze_sql_functions
+    
+    # Set PyArrow memory pool for better memory management
+    pa.set_memory_pool(pa.default_memory_pool())
 
     # Extract batch data and metadata from job config (now JSON serializable)
     batch_id = job_config['batch_id']        # Integer batch ID
@@ -221,7 +232,7 @@ def process_query_batch(self, job_config: Dict[str, Any]) -> Dict[str, Any]:
         success_mask = pc.equal(results_table['status'], 'success')
         successful_count = pc.sum(pc.cast(success_mask, pa.int64())).as_py()
 
-        # Store to Iceberg using PyArrow table directly (non-blocking)
+        # Store to Iceberg using PyArrow table directly (with DynamoDB lock)
         try:
             # Prepare batch_data with all needed fields for Iceberg storage
             batch_data = {
@@ -261,8 +272,9 @@ def process_query_batch(self, job_config: Dict[str, Any]) -> Dict[str, Any]:
 
     except Exception as exc:
         # Retry with exponential backoff (TestDriven.io pattern)
-        if self.request.retries < self.max_retries:
-            retry_delay = 60 * (2 ** self.request.retries)
+        if self.request.retries < 3:  # max_retries is set to 3 in the decorator
+            retry_delay = 10
+            logger.warning(f"🔄 Retryable error in task (attempt {self.request.retries + 1}/3): {error_msg}")
             raise self.retry(exc=exc, countdown=retry_delay)
         else:
             return {
@@ -273,7 +285,7 @@ def process_query_batch(self, job_config: Dict[str, Any]) -> Dict[str, Any]:
             }
 
 
-def store_results_table_to_iceberg(results_table: pa.Table, batch_data: Dict[str, Any]) -> bool:
+def store_results_table_to_iceberg(results_table, batch_data: Dict[str, Any]) -> bool:
     """
     Store PyArrow results table directly to Iceberg (OPTIMIZED APPROACH)
     Avoids dict->list->PyArrow conversions by working with Arrow tables throughout
@@ -300,15 +312,15 @@ def store_results_table_to_iceberg(results_table: pa.Table, batch_data: Dict[str
 
         import iceberg_handler as ih
 
-        # Force re-initialization of catalog in worker context
-        logger.info("Force re-initializing Iceberg catalog in worker context...")
-        ih.iceberg_catalog = None
-        ih.batch_statistics_table = None
-
-        success = ih.initialize_iceberg_catalog()
-        if not success or not ih.iceberg_catalog:
-            logger.warning("Failed to initialize Iceberg catalog in worker context")
-            return False
+        # Initialize catalog only if not already done
+        if not ih.iceberg_catalog:
+            logger.info("Initializing Iceberg catalog in worker context...")
+            success = ih.initialize_iceberg_catalog()
+            if not success or not ih.iceberg_catalog:
+                logger.warning("Failed to initialize Iceberg catalog in worker context")
+                return False
+        else:
+            logger.debug("Using existing Iceberg catalog connection")
 
     except ImportError as e:
         logger.warning(f"iceberg_handler not available: {e} - skipping Iceberg storage")
@@ -390,23 +402,25 @@ def store_results_table_to_iceberg(results_table: pa.Table, batch_data: Dict[str
                     "branch main has changed" in error_msg or
                     "expected id" in error_msg or
                     "Table has been updated by another process" in error_msg or
-                    "updated by another process" in error_msg
+                    "updated by another process" in error_msg or
+                    "Glue detected concurrent update" in error_msg or
+                    "concurrent update to table version" in error_msg
             )
 
             if is_concurrent_conflict:
-                if attempt < max_retries:
+                if attempt < retries:
                     import time
                     import random
                     # Add jitter to avoid thundering herd
                     jitter = random.uniform(0, 0.5)
                     sleep_time = retry_delay * (2 ** attempt) + jitter
                     logger.warning(
-                        f"🔄 Iceberg concurrency conflict (attempt {attempt + 1}/{max_retries + 1}). Retrying in {sleep_time:.2f}s...")
+                        f"🔄 Iceberg concurrency conflict (attempt {attempt + 1}/{retries + 1}). Retrying in {sleep_time:.2f}s...")
                     time.sleep(sleep_time)
                     continue
                 else:
                     logger.error(
-                        f"❌ Failed to store to Iceberg after {max_retries + 1} attempts due to concurrency conflicts: {error_msg}")
+                        f"❌ Failed to store to Iceberg after {retries + 1} attempts due to concurrency conflicts: {error_msg}")
                     return False
             else:
                 # Non-retryable error

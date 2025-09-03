@@ -1,13 +1,12 @@
 """
 Iceberg Handler Module
-Manages Iceberg table initialization and statistics
+Manages Iceberg table initialization and statistics with AWS Glue catalog
 """
 
 import logging
 import os
 from typing import Dict, Any
-from pathlib import Path
-from pyiceberg.catalog.sql import SqlCatalog
+from pyiceberg.catalog import load_catalog
 from pyiceberg.schema import Schema, NestedField
 from pyiceberg.types import StringType, IntegerType, TimestampType, ListType, LongType
 from pyiceberg.partitioning import PartitionSpec, PartitionField
@@ -19,11 +18,13 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Configuration - use absolute path and ensure directory exists
-# Force absolute path to be independent of working directory
-_current_file_dir = os.path.dirname(os.path.abspath(__file__))
-ICEBERG_WAREHOUSE_PATH = os.getenv("ICEBERG_WAREHOUSE_PATH", os.path.join(_current_file_dir, "iceberg_warehouse"))
-ICEBERG_CATALOG_NAME = os.getenv("ICEBERG_CATALOG_NAME", "local_catalog")
+# AWS Configuration - hardcoded credentials
+AWS_ACCESS_KEY_ID = "ASIAZYHN7XI6SJHG2IYS"
+AWS_SECRET_ACCESS_KEY = "J1gUJkFCD56VKhyjkC8Ema+RfuwwAxphvS8GC3Jq"
+AWS_SESSION_TOKEN = "FwoGZXIvYXdzEOj//////////wEaDGRdqp1tmWssuWSvziLWAX68UXEWe+GYyRaQpdTvG2CYABGE1z2YuUAham+71MnXE+o/dM/qERvUrbkFRg6lfFOILRytUbr/PwiWCdPYad9s5uK+uTzRucOFxpo8lNbD8LUnwIoLiKkA5DdHxK/qsrLPaQX0de4LUvNhBzW7qarP5rLm0G67CmW4lWmfvhp2xcF0CXZWRgk0UkJ+5DaNdvMnOz6IuQQUaAtQlpOZ9i8KuydmOYlk/5b5ybyvdme1vf0oD7iIMQaDdDlN6vCzc7p7VYQPT1vBQwEkF8BBrQcfUa4grGso2LXfxQYyM0qC+4aDBNUmrXGXr5s8ngKDmYfrENGAQAWd50UU3gvU8et5rkUhtXOjY8Q8JweFHHAzcA=="
+AWS_REGION = "us-east-1"
+S3_WAREHOUSE_PATH = "s3://batch-transpiler/testing-batch-processing/"
+ICEBERG_CATALOG_NAME = os.getenv("ICEBERG_CATALOG_NAME", "glue_catalog")
 
 # Global variables
 iceberg_catalog = None
@@ -31,42 +32,30 @@ batch_statistics_table = None
 
 
 def initialize_iceberg_catalog():
-    """Initialize Iceberg catalog and create tables if they don't exist"""
+    """Initialize AWS Glue Iceberg catalog and create tables if they don't exist"""
     global iceberg_catalog, batch_statistics_table
 
     try:
-        # Create warehouse directory if it doesn't exist
-        warehouse_path = Path(ICEBERG_WAREHOUSE_PATH).absolute()
-        warehouse_path.mkdir(parents=True, exist_ok=True)
+        logger.info(f"Initializing AWS Glue catalog with S3 warehouse: {S3_WAREHOUSE_PATH}")
         
-        # Ensure proper permissions on warehouse directory
-        try:
-            os.chmod(warehouse_path, 0o755)
-        except:
-            pass  # Might not be needed on all systems
-        
-        logger.info(f"Using Iceberg warehouse path: {warehouse_path}")
-
-        # SQLite database for catalog metadata
-        catalog_db = warehouse_path / "catalog.db"
-        
-        # Ensure catalog.db has proper permissions if it exists
-        if catalog_db.exists():
-            try:
-                os.chmod(catalog_db, 0o644)
-                logger.info(f"Using existing catalog database: {catalog_db}")
-            except:
-                pass
-        else:
-            logger.info(f"Will create new catalog database: {catalog_db}")
-
-        iceberg_catalog = SqlCatalog(
+        # Initialize AWS Glue catalog using pyiceberg load_catalog function
+        iceberg_catalog = load_catalog(
             name=ICEBERG_CATALOG_NAME,
-            uri=f"sqlite:///{catalog_db}",
-            warehouse=f"file://{warehouse_path}"
+            **{
+                "type": "glue",
+                "s3.access-key-id": AWS_ACCESS_KEY_ID,
+                "s3.secret-access-key": AWS_SECRET_ACCESS_KEY,
+                "s3.session-token": AWS_SESSION_TOKEN,
+                "s3.region": AWS_REGION,
+                "warehouse": S3_WAREHOUSE_PATH,
+                "glue.region": AWS_REGION,
+                "glue.access-key-id": AWS_ACCESS_KEY_ID,
+                "glue.secret-access-key": AWS_SECRET_ACCESS_KEY,
+                "glue.session-token": AWS_SESSION_TOKEN
+            }
         )
         
-        logger.info(f"Iceberg catalog initialized with URI: sqlite:///{catalog_db}")
+        logger.info(f"AWS Glue catalog initialized successfully")
 
         # Define batch statistics table schema with partitioning fields
         batch_stats_schema = Schema(
@@ -102,58 +91,35 @@ def initialize_iceberg_catalog():
         namespace = "default"
         try:
             iceberg_catalog.create_namespace(namespace)
-        except:
-            pass  # Namespace might already exist
+            logger.info(f"Created namespace: {namespace}")
+        except Exception as ns_error:
+            logger.info(f"Namespace {namespace} already exists or creation failed: {ns_error}")
 
-        # Create batch statistics table - try to load existing first
+        # Load existing batch statistics table
         table_identifier = f"{namespace}.batch_statistics"
         try:
-            # First try to load existing table
+            # Load existing table from S3
             batch_statistics_table = iceberg_catalog.load_table(table_identifier)
-            logger.info(f"Loaded existing Iceberg table: {table_identifier}")
+            logger.info(f"Successfully loaded existing Iceberg table: {table_identifier}")
             
-            # Check if table has the new schema with all required columns
+            # Log table schema for verification
             existing_columns = [field.name for field in batch_statistics_table.schema().fields]
-            required_columns = ["company_name", "event_date", "batch_number", "unsupported_functions_after_transpilation", "joins_list"]
-            missing_columns = [col for col in required_columns if col not in existing_columns]
+            logger.info(f"Table schema columns: {existing_columns}")
             
-            if missing_columns:
-                logger.info(f"Table missing required columns: {missing_columns}. Dropping and recreating table...")
-                try:
-                    # Drop the existing table
-                    iceberg_catalog.drop_table(table_identifier)
-                    logger.info(f"Dropped existing table: {table_identifier}")
-                    
-                    # Create new table with updated schema and partitioning
-                    batch_statistics_table = iceberg_catalog.create_table(
-                        identifier=table_identifier,
-                        schema=batch_stats_schema,
-                        partition_spec=partition_spec
-                    )
-                    logger.info(f"Created new Iceberg table with updated schema: {table_identifier}")
-                except Exception as recreate_error:
-                    logger.error(f"Failed to recreate table: {str(recreate_error)}")
-
         except Exception as e:
-            # Table doesn't exist, create a new one
-            try:
-                batch_statistics_table = iceberg_catalog.create_table(
-                    identifier=table_identifier,
-                    schema=batch_stats_schema,
-                    partition_spec=partition_spec
-                )
-                logger.info(f"Created new Iceberg table: {table_identifier}")
-            except Exception as create_error:
-                logger.error(f"Failed to create Iceberg table: {str(create_error)}")
-                batch_statistics_table = None
+            logger.error(f"Failed to load existing Iceberg table {table_identifier}: {str(e)}")
+            logger.info("The table should exist at s3://batch-transpiler/testing-batch-processing/default/batch_statistics/")
+            batch_statistics_table = None
 
-        logger.info("Iceberg catalog and tables initialized successfully")
+        logger.info("AWS Glue Iceberg catalog and tables initialized successfully")
         return True
 
     except Exception as e:
-        logger.error(f"Failed to initialize Iceberg catalog: {str(e)}")
+        logger.error(f"Failed to initialize AWS Glue Iceberg catalog: {str(e)}")
+        logger.error(f"Error details: {type(e).__name__}")
         return False
 
 
-# Initialize Iceberg catalog on module import
-initialize_iceberg_catalog()
+# Don't initialize on module import - causes segfault with forking
+# Initialize only in worker processes when needed
+# initialize_iceberg_catalog()

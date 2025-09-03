@@ -24,9 +24,9 @@ def get_filesystem(path: str) -> Optional[fs.FileSystem]:
     if path.startswith('s3://'):
         # AWS credentials - Replace with your actual credentials
         s3fs = fs.S3FileSystem(
-            access_key=os.getenv("AWS_ACCESS_KEY_ID", "YOUR_ACCESS_KEY_ID"),
-            secret_key=os.getenv("AWS_SECRET_ACCESS_KEY", "YOUR_SECRET_ACCESS_KEY"), 
-            session_token=os.getenv("AWS_SESSION_TOKEN", "YOUR_SESSION_TOKEN"),
+            access_key="ASIAZYHN7XI6SJHG2IYS",
+            secret_key="J1gUJkFCD56VKhyjkC8Ema+RfuwwAxphvS8GC3Jq",
+            session_token="FwoGZXIvYXdzEOj//////////wEaDGRdqp1tmWssuWSvziLWAX68UXEWe+GYyRaQpdTvG2CYABGE1z2YuUAham+71MnXE+o/dM/qERvUrbkFRg6lfFOILRytUbr/PwiWCdPYad9s5uK+uTzRucOFxpo8lNbD8LUnwIoLiKkA5DdHxK/qsrLPaQX0de4LUvNhBzW7qarP5rLm0G67CmW4lWmfvhp2xcF0CXZWRgk0UkJ+5DaNdvMnOz6IuQQUaAtQlpOZ9i8KuydmOYlk/5b5ybyvdme1vf0oD7iIMQaDdDlN6vCzc7p7VYQPT1vBQwEkF8BBrQcfUa4grGso2LXfxQYyM0qC+4aDBNUmrXGXr5s8ngKDmYfrENGAQAWd50UU3gvU8et5rkUhtXOjY8Q8JweFHHAzcA==",
             region="us-east-1",
             connect_timeout=30,
             request_timeout=60
@@ -103,9 +103,9 @@ def extract_unique_queries_from_file(
         # Create dataset
         if file_path.startswith('s3://'):
             s3fs_fs = s3fs.S3FileSystem(
-                key=os.getenv("AWS_ACCESS_KEY_ID", "YOUR_ACCESS_KEY_ID"),
-                secret=os.getenv("AWS_SECRET_ACCESS_KEY", "YOUR_SECRET_ACCESS_KEY"),
-                token=os.getenv("AWS_SESSION_TOKEN", "YOUR_SESSION_TOKEN"),
+                key="ASIAZYHN7XI6SJHG2IYS",
+                secret="J1gUJkFCD56VKhyjkC8Ema+RfuwwAxphvS8GC3Jq",
+                token="FwoGZXIvYXdzEOj//////////wEaDGRdqp1tmWssuWSvziLWAX68UXEWe+GYyRaQpdTvG2CYABGE1z2YuUAham+71MnXE+o/dM/qERvUrbkFRg6lfFOILRytUbr/PwiWCdPYad9s5uK+uTzRucOFxpo8lNbD8LUnwIoLiKkA5DdHxK/qsrLPaQX0de4LUvNhBzW7qarP5rLm0G67CmW4lWmfvhp2xcF0CXZWRgk0UkJ+5DaNdvMnOz6IuQQUaAtQlpOZ9i8KuydmOYlk/5b5ybyvdme1vf0oD7iIMQaDdDlN6vCzc7p7VYQPT1vBQwEkF8BBrQcfUa4grGso2LXfxQYyM0qC+4aDBNUmrXGXr5s8ngKDmYfrENGAQAWd50UU3gvU8et5rkUhtXOjY8Q8JweFHHAzcA==",
                 client_kwargs={'region_name': 'us-east-1'},
                 config_kwargs={'connect_timeout': 30, 'read_timeout': 60}
             )

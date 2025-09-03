@@ -54,7 +54,7 @@ echo ""
 
 # Use prefork pool with s3fs for multiprocessing performance without SIGSEGV
 # s3fs is more multiprocessing-friendly than PyArrow S3FileSystem
-celery -A worker.celery worker --loglevel=info --pool=prefork --autoscale=8,1 -Q processing_queue
+celery -A worker.celery worker --loglevel=info --pool=prefork --autoscale=5,1 -Q processing_queue
 
 echo ""
 echo "👋 Worker stopped"
