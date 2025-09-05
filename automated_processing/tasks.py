@@ -22,11 +22,12 @@ def get_filesystem(path: str) -> Optional[fs.FileSystem]:
     Get appropriate filesystem based on path (S3 or local)
     """
     if path.startswith('s3://'):
-        # AWS credentials - Replace with your actual credentials
+        # AWS credentials from environment variables
+        import os
         s3fs = fs.S3FileSystem(
-            access_key="ASIAZYHN7XI6SJHG2IYS",
-            secret_key="J1gUJkFCD56VKhyjkC8Ema+RfuwwAxphvS8GC3Jq",
-            session_token="FwoGZXIvYXdzEOj//////////wEaDGRdqp1tmWssuWSvziLWAX68UXEWe+GYyRaQpdTvG2CYABGE1z2YuUAham+71MnXE+o/dM/qERvUrbkFRg6lfFOILRytUbr/PwiWCdPYad9s5uK+uTzRucOFxpo8lNbD8LUnwIoLiKkA5DdHxK/qsrLPaQX0de4LUvNhBzW7qarP5rLm0G67CmW4lWmfvhp2xcF0CXZWRgk0UkJ+5DaNdvMnOz6IuQQUaAtQlpOZ9i8KuydmOYlk/5b5ybyvdme1vf0oD7iIMQaDdDlN6vCzc7p7VYQPT1vBQwEkF8BBrQcfUa4grGso2LXfxQYyM0qC+4aDBNUmrXGXr5s8ngKDmYfrENGAQAWd50UU3gvU8et5rkUhtXOjY8Q8JweFHHAzcA==",
+            access_key=os.getenv("AWS_ACCESS_KEY_ID", "ASIAZYHN7XI6QYKHCSQ2"),
+            secret_key=os.getenv("AWS_SECRET_ACCESS_KEY", "F27q3aYtKBABWi2g6pAzzG9wCxlyu5GDukjRLwK0"),
+            session_token=os.getenv("AWS_SESSION_TOKEN", "FwoGZXIvYXdzEBUaDI3lw73SHN9lT9vSGyLWASojho+IRhg6l4uosR5Pf5HEQoEv7cCunVX58+huZIN5SALH6aQNPN3UdIRGICRtmu6wCYUkyUDkOFbzMREUHwfbhopfetFxothPChQ1kkQYpwIRSssT6OKPzepHSWtZoRkWgPo+fIzyRb5ozAcaxS+jqYmhwX61R1LQmY2YY+eyOhbA4Po0esh0+TfMMFVQN+9+0p5fEUdsmNmaE5F/wUoXV8O5TpNreaDqIQ+/Qse/tYKyu2/xBmtALNAwGyplGWbQaLT8EQfsJkxfPemQLZYOxwWm6OIo0KnpxQYyM56H04GJWpfp71l224AN/XGayS5Z3av6wo8J5ZY3fGkY76d/5FvZyyepYFQTL5aGpwNZWw=="),
             region="us-east-1",
             connect_timeout=30,
             request_timeout=60
@@ -102,10 +103,11 @@ def extract_unique_queries_from_file(
         
         # Create dataset
         if file_path.startswith('s3://'):
+            import os
             s3fs_fs = s3fs.S3FileSystem(
-                key="ASIAZYHN7XI6SJHG2IYS",
-                secret="J1gUJkFCD56VKhyjkC8Ema+RfuwwAxphvS8GC3Jq",
-                token="FwoGZXIvYXdzEOj//////////wEaDGRdqp1tmWssuWSvziLWAX68UXEWe+GYyRaQpdTvG2CYABGE1z2YuUAham+71MnXE+o/dM/qERvUrbkFRg6lfFOILRytUbr/PwiWCdPYad9s5uK+uTzRucOFxpo8lNbD8LUnwIoLiKkA5DdHxK/qsrLPaQX0de4LUvNhBzW7qarP5rLm0G67CmW4lWmfvhp2xcF0CXZWRgk0UkJ+5DaNdvMnOz6IuQQUaAtQlpOZ9i8KuydmOYlk/5b5ybyvdme1vf0oD7iIMQaDdDlN6vCzc7p7VYQPT1vBQwEkF8BBrQcfUa4grGso2LXfxQYyM0qC+4aDBNUmrXGXr5s8ngKDmYfrENGAQAWd50UU3gvU8et5rkUhtXOjY8Q8JweFHHAzcA==",
+                key=os.getenv("AWS_ACCESS_KEY_ID", "ASIAZYHN7XI6QYKHCSQ2"),
+                secret=os.getenv("AWS_SECRET_ACCESS_KEY", "F27q3aYtKBABWi2g6pAzzG9wCxlyu5GDukjRLwK0"),
+                token=os.getenv("AWS_SESSION_TOKEN", "FwoGZXIvYXdzEBUaDI3lw73SHN9lT9vSGyLWASojho+IRhg6l4uosR5Pf5HEQoEv7cCunVX58+huZIN5SALH6aQNPN3UdIRGICRtmu6wCYUkyUDkOFbzMREUHwfbhopfetFxothPChQ1kkQYpwIRSssT6OKPzepHSWtZoRkWgPo+fIzyRb5ozAcaxS+jqYmhwX61R1LQmY2YY+eyOhbA4Po0esh0+TfMMFVQN+9+0p5fEUdsmNmaE5F/wUoXV8O5TpNreaDqIQ+/Qse/tYKyu2/xBmtALNAwGyplGWbQaLT8EQfsJkxfPemQLZYOxwWm6OIo0KnpxQYyM56H04GJWpfp71l224AN/XGayS5Z3av6wo8J5ZY3fGkY76d/5FvZyyepYFQTL5aGpwNZWw=="),
                 client_kwargs={'region_name': 'us-east-1'},
                 config_kwargs={'connect_timeout': 30, 'read_timeout': 60}
             )

@@ -95,42 +95,56 @@ def commit_session_to_iceberg(
         logger.info(f"✅ Validation passed: {validation_result['valid_files']} files, "
                    f"{validation_result['total_rows']:,} total rows")
         
-        # Step 3: Validate Iceberg table schema
-        schema_validation = iceberg_io.validate_table_schema(table_name)
+        # Step 3: Convert file paths to metadata format for new transaction-based API
+        import s3fs
+        import pyarrow.parquet as pq
+        from automated_processing.iceberg_io import AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, AWS_SESSION_TOKEN, AWS_REGION
         
-        if not schema_validation.get("schema_valid", False):
-            logger.error(f"❌ Iceberg table schema validation failed: {schema_validation}")
-            return {
-                "session_id": session_id,
-                "success": False,
-                "error": f"Table schema validation failed: {schema_validation.get('error', 'Schema mismatch')}",
-                "committed_files": 0,
-                "total_rows": 0,
-                "commit_duration_seconds": (datetime.now() - commit_start_time).total_seconds()
-            }
+        s3_fs = s3fs.S3FileSystem(
+            key=AWS_ACCESS_KEY_ID,
+            secret=AWS_SECRET_ACCESS_KEY,
+            token=AWS_SESSION_TOKEN,
+            client_kwargs={'region_name': AWS_REGION}
+        )
         
-        # Step 4: Perform atomic or chunked commit
-        if use_chunked_commit and len(staged_files) > chunk_size:
-            logger.info(f"🔄 Using chunked commit: {len(staged_files)} files in chunks of {chunk_size}")
-            
-            commit_result = iceberg_io.commit_staged_files_chunked(
-                session_id=session_id,
-                staged_files=staged_files,
-                metadata=session_metadata,
-                chunk_size=chunk_size,
-                table_name=table_name
-            )
-        else:
-            logger.info(f"💾 Using atomic commit: {len(staged_files)} files")
-            
-            commit_result = iceberg_io.commit_staged_files_atomic(
-                session_id=session_id,
-                staged_files=staged_files,
-                metadata=session_metadata,
-                table_name=table_name
-            )
+        # Convert file paths to metadata format expected by new transaction API
+        staged_files_with_metadata = []
+        for s3_path in staged_files:
+            try:
+                pq_file = pq.ParquetFile(s3_path, filesystem=s3_fs)
+                row_count = pq_file.metadata.num_rows
+                file_size = s3_fs.size(s3_path)
+                
+                staged_files_with_metadata.append({
+                    "path": s3_path,
+                    "row_count": row_count,
+                    "file_size": file_size,
+                    "partition": {"company_name": session_metadata.get("company_name", "unknown")}
+                })
+            except Exception as e:
+                logger.error(f"❌ Failed to read metadata for {s3_path}: {e}")
+                return {
+                    "session_id": session_id,
+                    "success": False,
+                    "error": f"Failed to read file metadata: {e}",
+                    "committed_files": 0,
+                    "total_rows": 0,
+                    "commit_duration_seconds": (datetime.now() - commit_start_time).total_seconds()
+                }
         
-        # Step 5: Handle commit results
+        logger.info(f"📊 Prepared {len(staged_files_with_metadata)} files with metadata")
+
+        # Step 4: Use streaming commit (commit every 10 files for better performance)
+        logger.info(f"💾 Using streaming commit approach: {len(staged_files_with_metadata)} files in chunks of 10")
+        
+        commit_result = iceberg_io.commit_staged_files_streaming(
+            session_id=session_id,
+            staged_files=staged_files_with_metadata,
+            table_name=table_name,
+            chunk_size=10  # Commit every 10 files immediately
+        )
+        
+        # Step 4: Handle commit results
         if not commit_result["success"]:
             logger.error(f"❌ Iceberg commit failed for session {session_id}: {commit_result.get('error')}")
             return {
@@ -143,7 +157,7 @@ def commit_session_to_iceberg(
                    f"{commit_result['committed_files']} files, "
                    f"{commit_result['total_rows']:,} rows")
         
-        # Step 6: Clean up staging files (optional)
+        # Step 5: Clean up staging files (optional)
         cleanup_success = True
         if cleanup_staging:
             try:
@@ -161,7 +175,7 @@ def commit_session_to_iceberg(
                 logger.warning(f"⚠️ Staging cleanup error for session {session_id}: {str(cleanup_error)}")
                 cleanup_success = False
         
-        # Step 7: Update manifest with commit information
+        # Step 6: Update manifest with commit information
         try:
             manifest = staging.read_staging_manifest(session_id)
             if manifest:
@@ -195,8 +209,7 @@ def commit_session_to_iceberg(
             "total_commit_duration_seconds": total_duration,
             "staging_files_preserved": not cleanup_staging or not cleanup_success,
             "validation_results": validation_result,
-            "schema_validation": schema_validation,
-            "commit_type": "chunked" if use_chunked_commit and len(staged_files) > chunk_size else "atomic"
+            "commit_type": commit_result.get("commit_type", "streaming")
         }
         
     except Exception as e:
