@@ -11,13 +11,13 @@ import s3fs
 
 logger = logging.getLogger(__name__)
 
-# S3 Configuration
+# S3 Configuration - using environment variables (preferred) or fallback credentials  
 S3_BUCKET = os.getenv("S3_BUCKET", "batch-transpiler")
 S3_STAGING_PREFIX = os.getenv("S3_STAGING_PREFIX", "staging")
-AWS_ACCESS_KEY_ID = "ASIAZYHN7XI6SJHG2IYS"
-AWS_SECRET_ACCESS_KEY = "J1gUJkFCD56VKhyjkC8Ema+RfuwwAxphvS8GC3Jq"
-AWS_SESSION_TOKEN = "FwoGZXIvYXdzEOj//////////wEaDGRdqp1tmWssuWSvziLWAX68UXEWe+GYyRaQpdTvG2CYABGE1z2YuUAham+71MnXE+o/dM/qERvUrbkFRg6lfFOILRytUbr/PwiWCdPYad9s5uK+uTzRucOFxpo8lNbD8LUnwIoLiKkA5DdHxK/qsrLPaQX0de4LUvNhBzW7qarP5rLm0G67CmW4lWmfvhp2xcF0CXZWRgk0UkJ+5DaNdvMnOz6IuQQUaAtQlpOZ9i8KuydmOYlk/5b5ybyvdme1vf0oD7iIMQaDdDlN6vCzc7p7VYQPT1vBQwEkF8BBrQcfUa4grGso2LXfxQYyM0qC+4aDBNUmrXGXr5s8ngKDmYfrENGAQAWd50UU3gvU8et5rkUhtXOjY8Q8JweFHHAzcA=="
-AWS_REGION = "us-east-1"
+AWS_ACCESS_KEY_ID = os.getenv("AWS_ACCESS_KEY_ID", "ASIAZYHN7XI6QYKHCSQ2")
+AWS_SECRET_ACCESS_KEY = os.getenv("AWS_SECRET_ACCESS_KEY", "F27q3aYtKBABWi2g6pAzzG9wCxlyu5GDukjRLwK0")
+AWS_SESSION_TOKEN = os.getenv("AWS_SESSION_TOKEN", "FwoGZXIvYXdzEBUaDI3lw73SHN9lT9vSGyLWASojho+IRhg6l4uosR5Pf5HEQoEv7cCunVX58+huZIN5SALH6aQNPN3UdIRGICRtmu6wCYUkyUDkOFbzMREUHwfbhopfetFxothPChQ1kkQYpwIRSssT6OKPzepHSWtZoRkWgPo+fIzyRb5ozAcaxS+jqYmhwX61R1LQmY2YY+eyOhbA4Po0esh0+TfMMFVQN+9+0p5fEUdsmNmaE5F/wUoXV8O5TpNreaDqIQ+/Qse/tYKyu2/xBmtALNAwGyplGWbQaLT8EQfsJkxfPemQLZYOxwWm6OIo0KnpxQYyM56H04GJWpfp71l224AN/XGayS5Z3av6wo8J5ZY3fGkY76d/5FvZyyepYFQTL5aGpwNZWw==")
+AWS_REGION = os.getenv("AWS_REGION", "us-east-1")
 
 
 def get_s3_filesystem() -> s3fs.S3FileSystem:
@@ -173,6 +173,19 @@ def list_staged_files(session_id: str) -> List[str]:
     staging_prefix = f"{S3_BUCKET}/{S3_STAGING_PREFIX}/{session_id}/"
     
     try:
+        # Clear any potential S3FS cache for this directory
+        if hasattr(s3fs, '_cache') and s3fs._cache:
+            # Remove cached entries for this session directory
+            cache_keys_to_remove = [k for k in s3fs._cache.keys() if staging_prefix in str(k)]
+            for key in cache_keys_to_remove:
+                s3fs._cache.pop(key, None)
+        
+        # Force refresh by using detail=True then detail=False
+        try:
+            s3fs.ls(staging_prefix, detail=True, refresh=True)
+        except:
+            pass  # Ignore errors in cache refresh
+        
         # List files using s3fs
         files = s3fs.ls(staging_prefix, detail=False)
         
@@ -181,7 +194,7 @@ def list_staged_files(session_id: str) -> List[str]:
             if file_path.endswith('.parquet'):
                 staged_files.append(f"s3://{file_path}")
         
-        logger.info(f"📂 Found {len(staged_files)} staged files for session {session_id}")
+        logger.info(f"📂 Found {len(staged_files)} staged files for session {session_id} (prefix: {staging_prefix})")
         return sorted(staged_files)  # Sort for consistent ordering
         
     except Exception as e:
@@ -315,8 +328,11 @@ def get_staging_statistics(session_id: str) -> Dict[str, Any]:
             "session_id": session_id,
             "total_files": 0,
             "total_size_bytes": 0,
+            "total_size_mb": 0.0,
+            "staged_files": [],
             "manifest_exists": manifest is not None,
-            "staging_complete": False
+            "staging_complete": manifest.get('staging_complete', False) if manifest else False,
+            "manifest_data": manifest
         }
     
     s3fs = get_s3_filesystem()
