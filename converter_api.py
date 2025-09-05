@@ -655,7 +655,7 @@ async def guardstats(
 import sys
 sys.path.append('./final_distributed_processing')
 sys.path.append('./automated_processing')
-from automated_processing.orchestrator import orchestrate_processing, get_processing_status, get_task_result
+from automated_processing.orchestrator import orchestrate_staging_based_processing, monitor_session_progress
 
 
 @app.post("/process-parquet-directory-automated")
@@ -704,19 +704,104 @@ async def process_parquet_directory_automated(
             except json.JSONDecodeError:
                 raise HTTPException(status_code=400, detail="Invalid JSON format for filters parameter")
         
-        # Use the new simplified orchestrator
-        logger.info("🔧 Starting processing with Celery orchestrator...")
+        # Use existing file processing with staging-based orchestration
+        logger.info("🔧 Starting processing with staging-based Celery orchestrator...")
         
-        # Call the orchestrator which returns immediately
-        result = orchestrate_processing(
-            directory_path=directory_path.strip(),
-            company_name=company_name.strip(),
-            from_dialect=from_dialect.lower().strip(),
-            to_dialect=to_dialect.lower().strip(),
-            query_column=query_column.strip(),
-            batch_size=batch_size,
-            filters=filter_dict,
-            name=session_name.strip() if session_name else None
+        # Import the existing file processing functions
+        from automated_processing.tasks import discover_parquet_files, extract_unique_queries_from_file, create_query_batch_configs
+        
+        # Use existing file discovery logic
+        file_paths = discover_parquet_files(
+            directory_path.strip(),
+            query_column.strip()
+        )
+        
+        if not file_paths:
+            raise HTTPException(
+                status_code=400, 
+                detail=f'No valid parquet files found in {directory_path}'
+            )
+        
+        # Process all files and collect batch configs (same as original orchestrator)
+        all_batch_configs = []
+        session_id = f"api_session_{int(datetime.now().timestamp())}"
+        
+        for file_path in file_paths:
+            file_name = os.path.basename(file_path)
+            logger.info(f"📖 Reading and processing file: {file_name}")
+            
+            # Extract unique queries from this file as PyArrow table
+            unique_table = extract_unique_queries_from_file(
+                file_path,
+                query_column.strip(),
+                filter_dict
+            )
+            
+            if len(unique_table) == 0:
+                logger.warning(f"No queries found in {file_name}")
+                continue
+            
+            logger.info(f"✅ Extracted {len(unique_table):,} unique queries from {file_name}")
+            
+            # Create batch configurations - get PyArrow table + metadata
+            batch_table, metadata = create_query_batch_configs(
+                unique_table,
+                session_id,
+                company_name.strip(),
+                from_dialect.lower().strip(),
+                to_dialect.lower().strip(),
+                query_column.strip(),
+                batch_size,
+                {'file_path': file_path, 'file_name': file_name}
+            )
+            
+            # Each row is a job - extract queries as Python list for JSON serialization
+            for i in range(len(batch_table)):
+                batch_id = batch_table['batch_id'][i].as_py()  # Extract batch ID
+                queries_array = batch_table['queries_array'][i].as_py()  # Extract queries as Python list
+                
+                all_batch_configs.append({
+                    'batch_id': batch_id,
+                    'queries_list': queries_array,  # Python list (JSON serializable)
+                    'metadata': metadata
+                })
+        
+        if not all_batch_configs:
+            raise HTTPException(
+                status_code=400,
+                detail='No valid queries found in any files'
+            )
+        
+        logger.info(f"📦 Created {len(all_batch_configs)} batch configs from file processing")
+        
+        # Convert to staging-based batches_data format
+        batches_data = []
+        for config in all_batch_configs:
+            batches_data.append({
+                "queries_list": config['queries_list'],
+                "testing": False
+            })
+        
+        # Create session metadata
+        session_metadata = {
+            "company_name": company_name.strip(),
+            "from_dialect": from_dialect.lower().strip(),
+            "to_dialect": to_dialect.lower().strip(),
+            "query_column": query_column.strip(),
+            "batch_size": batch_size,
+            "filters": filter_dict,
+            "session_name": session_name.strip() if session_name else None,
+            "created_at": datetime.now().isoformat(),
+            "directory_path": directory_path.strip()
+        }
+        
+        # Use staging-based orchestration with real file data
+        result = orchestrate_staging_based_processing(
+            session_id=session_id,
+            batches_data=batches_data,
+            session_metadata=session_metadata,
+            use_chord=True,
+            cleanup_staging=True
         )
         
         # Check if there was an error
@@ -765,10 +850,28 @@ async def process_parquet_directory_automated(
 
 @app.get("/processing-status/{session_id}")
 async def get_processing_session_status(session_id: str):
-    """Get status of automated processing session"""
+    """Get status of automated processing session or discover all sessions"""
     try:
-        # Let the orchestrator handle task discovery from Redis
-        result = get_processing_status(session_id, [])
+        # Special case: discover all active sessions
+        if session_id == "discover_all":
+            from automated_processing.orchestrator import discover_active_sessions_from_redis
+            
+            # Discover all session IDs from Redis session metadata
+            discovered_sessions = discover_active_sessions_from_redis()
+            
+            return {
+                "session_id": "discover_all",
+                "discovered_sessions": discovered_sessions,
+                "total_discovered": len(discovered_sessions),
+                "discovery_method": "redis_based"
+            }
+        
+        # Regular session status check using the staging-based monitoring function
+        result = monitor_session_progress(
+            session_id=session_id,
+            workers_group_id=None,  # Will be auto-discovered from staging files
+            committer_task_id=None  # Will be auto-discovered if needed
+        )
         return result
     except Exception as e:
         logger.error(f"❌ Error getting session status: {str(e)}")
@@ -779,8 +882,28 @@ async def get_processing_session_status(session_id: str):
 async def get_individual_task_result(task_id: str):
     """Get result of a specific task"""
     try:
-        result = get_task_result(task_id)
-        return result
+        from celery.result import AsyncResult
+        from automated_processing.worker import celery
+        
+        result = AsyncResult(task_id, backend=celery.backend)
+        
+        response = {
+            'task_id': task_id,
+            'state': result.state,
+            'ready': result.ready()
+        }
+        
+        if result.ready():
+            if result.successful():
+                response['result'] = result.result
+                response['status'] = 'SUCCESS'
+            else:
+                response['error'] = str(result.info)
+                response['status'] = 'FAILURE'
+        else:
+            response['status'] = 'PENDING'
+            
+        return response
     except Exception as e:
         logger.error(f"❌ Error getting task result: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Failed to get task result: {str(e)}")
@@ -798,9 +921,9 @@ async def validate_s3_bucket(
         
         try:
             s3fs = fs.S3FileSystem(
-                access_key=os.getenv("AWS_ACCESS_KEY_ID", "YOUR_ACCESS_KEY_ID"),
-                secret_key=os.getenv("AWS_SECRET_ACCESS_KEY", "YOUR_SECRET_ACCESS_KEY"),
-                session_token=os.getenv("AWS_SESSION_TOKEN", "YOUR_SESSION_TOKEN"),
+                access_key=os.getenv("AWS_ACCESS_KEY_ID", "ASIAZYHN7XI6QYKHCSQ2"),
+                secret_key=os.getenv("AWS_SECRET_ACCESS_KEY", "F27q3aYtKBABWi2g6pAzzG9wCxlyu5GDukjRLwK0"),
+                session_token=os.getenv("AWS_SESSION_TOKEN", "FwoGZXIvYXdzEBUaDI3lw73SHN9lT9vSGyLWASojho+IRhg6l4uosR5Pf5HEQoEv7cCunVX58+huZIN5SALH6aQNPN3UdIRGICRtmu6wCYUkyUDkOFbzMREUHwfbhopfetFxothPChQ1kkQYpwIRSssT6OKPzepHSWtZoRkWgPo+fIzyRb5ozAcaxS+jqYmhwX61R1LQmY2YY+eyOhbA4Po0esh0+TfMMFVQN+9+0p5fEUdsmNmaE5F/wUoXV8O5TpNreaDqIQ+/Qse/tYKyu2/xBmtALNAwGyplGWbQaLT8EQfsJkxfPemQLZYOxwWm6OIo0KnpxQYyM56H04GJWpfp71l224AN/XGayS5Z3av6wo8J5ZY3fGkY76d/5FvZyyepYFQTL5aGpwNZWw=="),
                 region=os.getenv("AWS_DEFAULT_REGION", "us-east-1")
             )
         except Exception as e:
@@ -846,4 +969,4 @@ if __name__ == "__main__":
     
     logger.info(f"Detected {cpu_cores} CPU cores, using {workers} workers")
     
-    uvicorn.run("converter_api:app", host="0.0.0.0", port=8100, proxy_headers=True, workers=workers)
+    uvicorn.run("converter_api:app", host="0.0.0.0", port=8080, proxy_headers=True, workers=workers)
