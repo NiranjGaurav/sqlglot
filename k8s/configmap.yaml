@@ -1,0 +1,33 @@
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: app-config
+  namespace: sqlglot
+data:
+  # Celery Configuration
+  CELERY_BROKER_URL: "redis://redis:6379/0"
+  CELERY_RESULT_BACKEND: "redis://redis:6379/0"
+  
+  # Python Configuration
+  PYTHONUNBUFFERED: "1"
+  PYTHONPATH: "/app:/app/automated_processing"
+  
+  # PyArrow Configuration (prevent segfaults)
+  ARROW_ENABLE_NULL_CHECK_FOR_GET: "0"
+  ARROW_ENABLE_TIMING_TESTS: "0"
+  OMP_NUM_THREADS: "1"
+  
+  # AWS Configuration
+  AWS_REGION: "us-east-1"
+  S3_BUCKET: "batch-transpiler"
+  S3_STAGING_PREFIX: "staging"
+  ICEBERG_CATALOG_NAME: "glue_catalog"
+  
+  # Application Configuration
+  ENABLE_GUARDRAIL: "False"
+  STORAGE_ENGINE_URL: "localhost"
+  STORAGE_ENGINE_PORT: "9005"
+  
+  # Uvicorn Configuration
+  UVICORN_WORKERS: "2"

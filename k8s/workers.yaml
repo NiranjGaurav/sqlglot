@@ -1,0 +1,227 @@
+---
+# Processing Workers Deployment (can scale horizontally)
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: celery-workers
+  namespace: sqlglot
+  labels:
+    app: celery-worker
+spec:
+  replicas: 1  # Will be managed by HPA
+  selector:
+    matchLabels:
+      app: celery-worker
+  template:
+    metadata:
+      labels:
+        app: celery-worker
+    spec:
+      containers:
+        - name: celery-worker
+          image: sqlglot/worker:latest
+          imagePullPolicy: Never  # For minikube local images
+          command:
+            - celery
+            - -A
+            - worker.celery
+            - worker
+            - --loglevel=info
+            - --pool=prefork
+            - --concurrency=2
+            - -Q
+            - processing_queue
+          env:
+            - name: CELERY_BROKER_URL
+              value: "redis://redis:6379/0"
+            - name: CELERY_RESULT_BACKEND
+              value: "redis://redis:6379/0"
+            - name: PYTHONUNBUFFERED
+              value: "1"
+            - name: OMP_NUM_THREADS
+              value: "1"
+            - name: ARROW_ENABLE_NULL_CHECK_FOR_GET
+              value: "0"
+            - name: ARROW_ENABLE_TIMING_TESTS
+              value: "0"
+            - name: AWS_DEFAULT_REGION
+              value: "us-east-1"
+          envFrom:
+            - configMapRef:
+                name: app-config
+            - secretRef:
+                name: aws-credentials
+          resources:
+            requests:
+              memory: "512Mi"
+              cpu: "250m"
+            limits:
+              memory: "1Gi"
+              cpu: "500m"
+          livenessProbe:
+            exec:
+              command:
+                - celery
+                - -A
+                - worker.celery
+                - inspect
+                - ping
+            initialDelaySeconds: 60
+            periodSeconds: 60
+            timeoutSeconds: 30
+            failureThreshold: 5
+          readinessProbe:
+            exec:
+              command:
+                - celery
+                - -A
+                - worker.celery
+                - inspect
+                - ping
+            initialDelaySeconds: 45
+            periodSeconds: 30
+            timeoutSeconds: 20
+            failureThreshold: 3
+          volumeMounts:
+            - name: results
+              mountPath: /app/results
+            - name: logs
+              mountPath: /app/logs
+            - name: iceberg-warehouse
+              mountPath: /app/iceberg_warehouse
+      volumes:
+        - name: results
+          emptyDir: {}
+        - name: logs
+          emptyDir: {}
+        - name: iceberg-warehouse
+          emptyDir: {}
+      restartPolicy: Always
+
+---
+# Single Iceberg Committer Deployment (exactly 1 replica, never scales)
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: iceberg-committer
+  namespace: sqlglot
+  labels:
+    app: iceberg-committer
+spec:
+  replicas: 1  # ALWAYS exactly 1 - never scales
+  selector:
+    matchLabels:
+      app: iceberg-committer
+  template:
+    metadata:
+      labels:
+        app: iceberg-committer
+    spec:
+      containers:
+        - name: iceberg-committer
+          image: sqlglot/worker:latest
+          imagePullPolicy: Never
+          command:
+            - celery
+            - -A
+            - worker.celery
+            - worker
+            - --loglevel=info
+            - --pool=solo
+            - --concurrency=1
+            - -Q
+            - iceberg_commit
+          env:
+            - name: CELERY_BROKER_URL
+              value: "redis://redis:6379/0"
+            - name: CELERY_RESULT_BACKEND
+              value: "redis://redis:6379/0"
+            - name: PYTHONUNBUFFERED
+              value: "1"
+            - name: OMP_NUM_THREADS
+              value: "1"
+            - name: ARROW_ENABLE_NULL_CHECK_FOR_GET
+              value: "0"
+            - name: ARROW_ENABLE_TIMING_TESTS
+              value: "0"
+            - name: AWS_DEFAULT_REGION
+              value: "us-east-1"
+          envFrom:
+            - configMapRef:
+                name: app-config
+            - secretRef:
+                name: aws-credentials
+          resources:
+            requests:
+              memory: "256Mi"
+              cpu: "100m"
+            limits:
+              memory: "512Mi"
+              cpu: "250m"
+          livenessProbe:
+            exec:
+              command:
+                - celery
+                - -A
+                - worker.celery
+                - inspect
+                - ping
+            initialDelaySeconds: 60
+            periodSeconds: 60
+            timeoutSeconds: 30
+            failureThreshold: 5
+          readinessProbe:
+            exec:
+              command:
+                - celery
+                - -A
+                - worker.celery
+                - inspect
+                - ping
+            initialDelaySeconds: 45
+            periodSeconds: 30
+            timeoutSeconds: 20
+            failureThreshold: 3
+          volumeMounts:
+            - name: results
+              mountPath: /app/results
+            - name: logs
+              mountPath: /app/logs
+            - name: iceberg-warehouse
+              mountPath: /app/iceberg_warehouse
+      volumes:
+        - name: results
+          emptyDir: {}
+        - name: logs
+          emptyDir: {}
+        - name: iceberg-warehouse
+          emptyDir: {}
+      restartPolicy: Always
+
+---
+# HorizontalPodAutoscaler for workers (optional)
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: celery-workers-hpa
+  namespace: sqlglot
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: celery-workers
+  minReplicas: 1
+  maxReplicas: 2  # Max 2 workers as requested
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 70
+    - type: Resource
+      resource:
+        name: memory
+        target:
+          type: Utilization
+          averageUtilization: 80
