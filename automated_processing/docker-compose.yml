@@ -22,7 +22,7 @@ services:
       dockerfile: Dockerfile.api
     container_name: converter-api
     ports:
-      - "8080:8080"
+      - "8100:8100"
     environment:
       - CELERY_BROKER_URL=redis://redis:6379/0
       - CELERY_RESULT_BACKEND=redis://redis:6379/0

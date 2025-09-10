@@ -20,8 +20,7 @@ COPY automated_processing/requirements.txt ./
 RUN pip install --no-cache-dir --user \
     -r requirements.txt \
     sqlglot==20.11.0 \
-    boto3==1.34.11 \
-    s3fs==2023.12.0
+    boto3==1.34.11
 
 # Stage 2: Production image
 FROM python:3.11-slim
@@ -47,7 +46,7 @@ COPY --chown=worker:worker sqlglot /app/sqlglot
 COPY --chown=worker:worker guardrail /app/guardrail
 
 # Environment setup
-ENV PYTHONPATH=/app:/app/automated_processing:$PYTHONPATH
+ENV PYTHONPATH=/app:/app/automated_processing
 ENV PATH=/home/worker/.local/bin:$PATH
 ENV PYTHONUNBUFFERED=1
 

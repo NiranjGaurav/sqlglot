@@ -3,10 +3,13 @@ FROM python:3.12-alpine
 # Set the working directory in the container
 WORKDIR /app
 
-# Install dependencies required for building certain packages, including pyarrow
-RUN apk add --no-cache gcc g++ cmake make libxml2-dev libxslt-dev \
-    && apk add --no-cache py3-pyarrow openssl && \
-    adduser --home /app e6 --disabled-password
+# Install dependencies required for building certain packages, including pyarrow and psutil
+RUN apk add --no-cache \
+    gcc g++ cmake make \
+    libxml2-dev libxslt-dev \
+    linux-headers musl-dev python3-dev \
+    openssl-dev py3-pyarrow \
+    && adduser --home /app e6 --disabled-password
 
 # Copy the requirements file into the container
 COPY requirements.txt .
