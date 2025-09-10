@@ -20,6 +20,7 @@ import pandas as pd
 from io import BytesIO
 import time
 import uuid
+from functools import lru_cache
 from sqlglot.optimizer.qualify_columns import quote_identifiers
 from sqlglot import parse_one
 from guardrail.main import StorageServiceClient
@@ -178,7 +179,87 @@ async def convert_query(
 
 @app.get("/health")
 def health_check():
-    return Response(status_code=200)
+    """Enhanced health check including Iceberg connectivity"""
+    health_status = {
+        "status": "healthy",
+        "timestamp": datetime.now().isoformat(),
+        "services": {}
+    }
+    
+    try:
+        # Test Iceberg catalog connectivity
+        from automated_processing.iceberg_io import get_iceberg_catalog
+        
+        try:
+            catalog = get_iceberg_catalog()
+            health_status["services"]["iceberg"] = {
+                "status": "connected",
+                "catalog_type": "AWS Glue"
+            }
+        except Exception as iceberg_error:
+            health_status["services"]["iceberg"] = {
+                "status": "error",
+                "error": str(iceberg_error),
+                "catalog_type": "AWS Glue"
+            }
+            health_status["status"] = "degraded"
+        
+        # Test Redis connectivity (if available)
+        try:
+            import redis
+            import os
+            
+            # Parse Redis URL from environment
+            broker_url = os.getenv("CELERY_BROKER_URL", "redis://localhost:6379/0")
+            if broker_url.startswith("redis://"):
+                url_parts = broker_url.replace("redis://", "").split("/")[0]
+                if ":" in url_parts:
+                    host, port = url_parts.split(":")
+                    port = int(port)
+                else:
+                    host = url_parts
+                    port = 6379
+                
+                r = redis.Redis(host=host, port=port, db=0, socket_timeout=5)
+                r.ping()
+                health_status["services"]["redis"] = {
+                    "status": "connected",
+                    "host": host,
+                    "port": port
+                }
+            else:
+                health_status["services"]["redis"] = {
+                    "status": "unknown",
+                    "error": "Invalid CELERY_BROKER_URL format"
+                }
+        except Exception as redis_error:
+            health_status["services"]["redis"] = {
+                "status": "error", 
+                "error": str(redis_error)
+            }
+            if health_status["status"] == "healthy":
+                health_status["status"] = "degraded"
+        
+        # Return appropriate HTTP status
+        if health_status["status"] == "healthy":
+            return health_status
+        else:
+            return Response(
+                content=json.dumps(health_status),
+                status_code=200,  # Still return 200 for degraded to avoid K8s restart
+                media_type="application/json"
+            )
+            
+    except Exception as e:
+        return Response(
+            content=json.dumps({
+                "status": "error",
+                "timestamp": datetime.now().isoformat(),
+                "error": str(e)
+            }),
+            status_code=500,
+            media_type="application/json"
+        )
 
 
 @app.post("/guardrail")
@@ -450,7 +531,6 @@ async def stats_api(
             unsupported_in_converted = []
             executable = "NO"
 
-
         return {
             "supported_functions": supported,
             "unsupported_functions": set(unsupported),
@@ -653,48 +733,86 @@ async def guardstats(
 
 # Import distributed processing modules
 import sys
-sys.path.append('./final_distributed_processing')
-sys.path.append('./automated_processing')
-from automated_processing.orchestrator import orchestrate_staging_based_processing, monitor_session_progress
+
+sys.path.append("./final_distributed_processing")
+sys.path.append("./automated_processing")
+from automated_processing.orchestrator import (
+    orchestrate_staging_based_processing,
+    monitor_session_progress,
+)
+
+# Simple cache for session status to improve performance
+_session_status_cache = {}
+_cache_ttl = 8  # seconds
+
+def get_cached_session_status(session_id: str):
+    """Get cached session status if available and not expired"""
+    current_time = time.time()
+    if session_id in _session_status_cache:
+        cached_result, timestamp = _session_status_cache[session_id]
+        if current_time - timestamp < _cache_ttl:
+            logger.info(f"📋 Returning cached status for session {session_id}")
+            return cached_result
+    return None
+
+def cache_session_status(session_id: str, result):
+    """Cache session status result"""
+    current_time = time.time()
+    _session_status_cache[session_id] = (result, current_time)
+    
+    # Simple cleanup: remove old entries if cache gets too large
+    if len(_session_status_cache) > 100:
+        cutoff_time = current_time - _cache_ttl
+        expired_keys = [k for k, (_, ts) in _session_status_cache.items() if ts < cutoff_time]
+        for key in expired_keys:
+            del _session_status_cache[key]
 
 
 @app.post("/process-parquet-directory-automated")
 async def process_parquet_directory_automated(
-    directory_path: str = Form(..., description="Path to directory containing parquet files OR path to a single parquet file"),
+    directory_path: str = Form(
+        ...,
+        description="Path to directory containing parquet files OR path to a single parquet file",
+    ),
     company_name: str = Form(..., description="Company identifier for Iceberg partitioning"),
     from_dialect: str = Form(..., description="Source SQL dialect (e.g., snowflake, bigquery)"),
     to_dialect: str = Form("e6", description="Target SQL dialect"),
     query_column: str = Form(..., description="Column name containing SQL queries"),
     batch_size: int = Form(10000, description="Number of queries per batch"),
-    filters: Optional[str] = Form(None, description="JSON string of column filters e.g. '{\"statement_type\": \"SELECT\", \"client_application\": \"PowerBI\"}'"),
-    session_name: Optional[str] = Form(None, description="Custom session name for identification")
+    filters: Optional[str] = Form(
+        None,
+        description='JSON string of column filters e.g. \'{"statement_type": "SELECT", "client_application": "PowerBI"}\'',
+    ),
+    session_name: Optional[str] = Form(None, description="Custom session name for identification"),
 ):
     """
     Batch processing endpoint for parquet files containing SQL queries.
-    
+
     Accepts either:
     - Path to a directory containing parquet files (e.g., "/path/to/parquet_files/")
     - Path to a single parquet file (e.g., "/path/to/file.parquet")
     - S3 directory path (e.g., "s3://bucket/path/to/directory/")
     - S3 single file path (e.g., "s3://bucket/path/to/file.parquet")
-    
+
     Processes queries through SQLGlot transpilation using Celery distributed workers.
     Results are stored in Iceberg table with partitioning by company_name and event_date.
     """
-    
-    logger.info(f"🚀 Starting FULLY AUTONOMOUS processing: {directory_path} ({from_dialect} -> {to_dialect})")
-    
+
+    logger.info(
+        f"🚀 Starting FULLY AUTONOMOUS processing: {directory_path} ({from_dialect} -> {to_dialect})"
+    )
+
     try:
         # Validate inputs first
         if not directory_path or not directory_path.strip():
             raise HTTPException(status_code=400, detail="directory_path is required")
-        
+
         if not query_column or not query_column.strip():
             raise HTTPException(status_code=400, detail="query_column is required")
-        
+
         if batch_size <= 0:
             raise HTTPException(status_code=400, detail="batch_size must be positive")
-        
+
         # Parse filters if provided
         filter_dict = {}
         if filters and filters.strip():
@@ -702,47 +820,47 @@ async def process_parquet_directory_automated(
                 filter_dict = json.loads(filters)
                 logger.info(f"Parsed filters: {filter_dict}")
             except json.JSONDecodeError:
-                raise HTTPException(status_code=400, detail="Invalid JSON format for filters parameter")
-        
+                raise HTTPException(
+                    status_code=400, detail="Invalid JSON format for filters parameter"
+                )
+
         # Use existing file processing with staging-based orchestration
         logger.info("🔧 Starting processing with staging-based Celery orchestrator...")
-        
+
         # Import the existing file processing functions
-        from automated_processing.tasks import discover_parquet_files, extract_unique_queries_from_file, create_query_batch_configs
-        
-        # Use existing file discovery logic
-        file_paths = discover_parquet_files(
-            directory_path.strip(),
-            query_column.strip()
+        from automated_processing.tasks import (
+            discover_parquet_files,
+            extract_unique_queries_from_file,
+            create_query_batch_configs,
         )
-        
+
+        # Use existing file discovery logic
+        file_paths = discover_parquet_files(directory_path.strip(), query_column.strip())
+
         if not file_paths:
             raise HTTPException(
-                status_code=400, 
-                detail=f'No valid parquet files found in {directory_path}'
+                status_code=400, detail=f"No valid parquet files found in {directory_path}"
             )
-        
+
         # Process all files and collect batch configs (same as original orchestrator)
         all_batch_configs = []
         session_id = f"api_session_{int(datetime.now().timestamp())}"
-        
+
         for file_path in file_paths:
             file_name = os.path.basename(file_path)
             logger.info(f"📖 Reading and processing file: {file_name}")
-            
+
             # Extract unique queries from this file as PyArrow table
             unique_table = extract_unique_queries_from_file(
-                file_path,
-                query_column.strip(),
-                filter_dict
+                file_path, query_column.strip(), filter_dict
             )
-            
+
             if len(unique_table) == 0:
                 logger.warning(f"No queries found in {file_name}")
                 continue
-            
+
             logger.info(f"✅ Extracted {len(unique_table):,} unique queries from {file_name}")
-            
+
             # Create batch configurations - get PyArrow table + metadata
             batch_table, metadata = create_query_batch_configs(
                 unique_table,
@@ -752,36 +870,34 @@ async def process_parquet_directory_automated(
                 to_dialect.lower().strip(),
                 query_column.strip(),
                 batch_size,
-                {'file_path': file_path, 'file_name': file_name}
+                {"file_path": file_path, "file_name": file_name},
             )
-            
+
             # Each row is a job - extract queries as Python list for JSON serialization
             for i in range(len(batch_table)):
-                batch_id = batch_table['batch_id'][i].as_py()  # Extract batch ID
-                queries_array = batch_table['queries_array'][i].as_py()  # Extract queries as Python list
-                
-                all_batch_configs.append({
-                    'batch_id': batch_id,
-                    'queries_list': queries_array,  # Python list (JSON serializable)
-                    'metadata': metadata
-                })
-        
+                batch_id = batch_table["batch_id"][i].as_py()  # Extract batch ID
+                queries_array = batch_table["queries_array"][
+                    i
+                ].as_py()  # Extract queries as Python list
+
+                all_batch_configs.append(
+                    {
+                        "batch_id": batch_id,
+                        "queries_list": queries_array,  # Python list (JSON serializable)
+                        "metadata": metadata,
+                    }
+                )
+
         if not all_batch_configs:
-            raise HTTPException(
-                status_code=400,
-                detail='No valid queries found in any files'
-            )
-        
+            raise HTTPException(status_code=400, detail="No valid queries found in any files")
+
         logger.info(f"📦 Created {len(all_batch_configs)} batch configs from file processing")
-        
+
         # Convert to staging-based batches_data format
         batches_data = []
         for config in all_batch_configs:
-            batches_data.append({
-                "queries_list": config['queries_list'],
-                "testing": False
-            })
-        
+            batches_data.append({"queries_list": config["queries_list"], "testing": False})
+
         # Create session metadata
         session_metadata = {
             "company_name": company_name.strip(),
@@ -792,60 +908,62 @@ async def process_parquet_directory_automated(
             "filters": filter_dict,
             "session_name": session_name.strip() if session_name else None,
             "created_at": datetime.now().isoformat(),
-            "directory_path": directory_path.strip()
+            "directory_path": directory_path.strip(),
         }
-        
+
         # Use staging-based orchestration with real file data
         result = orchestrate_staging_based_processing(
             session_id=session_id,
             batches_data=batches_data,
             session_metadata=session_metadata,
             use_chord=True,
-            cleanup_staging=True
+            cleanup_staging=True,
         )
-        
+
         # Check if there was an error
-        if 'error' in result:
+        if "error" in result:
             logger.error(f"❌ Orchestration failed: {result['error']}")
-            raise HTTPException(status_code=500, detail=result['error'])
-        
+            raise HTTPException(status_code=500, detail=result["error"])
+
         logger.info(f"✅ Processing started with session {result['session_id']}")
-        
+
         # Fixed Iceberg storage structure
-        event_date = datetime.now().strftime('%Y-%m-%d')
+        event_date = datetime.now().strftime("%Y-%m-%d")
         iceberg_structure = f"company_name={company_name}/event_date={event_date}/"
-        
+
         logger.info(f"📂 Iceberg structure: {iceberg_structure}")
-        
+
         return {
-            "session_id": result['session_id'],
-            "total_files": result.get('total_files', 0),
-            "total_batches": result.get('total_batches', 0),
-            "task_ids": result.get('task_ids', []),
-            "status": result.get('status', 'processing'),
-            "created_at": result.get('created_at'),
+            "session_id": result["session_id"],
+            "total_files": result.get("total_files", 0),
+            "total_batches": result.get("total_batches", 0),
+            "task_ids": result.get("task_ids", []),
+            "status": result.get("status", "processing"),
+            "created_at": result.get("created_at"),
             "status_url": f"/processing-status/{result['session_id']}",
             "configuration": {
                 "directory_path": directory_path,
                 "company_name": company_name,
                 "query_column": query_column,
                 "batch_size": batch_size,
-                "dialect_conversion": f"{from_dialect} -> {to_dialect}"
+                "dialect_conversion": f"{from_dialect} -> {to_dialect}",
             },
             "iceberg_storage": {
                 "table": "default.batch_statistics",
                 "partition_structure": iceberg_structure,
-                "storage_pattern": f"{iceberg_structure}session_{result['session_id']}_batch_{{batch_id}}.parquet"
+                "storage_pattern": f"{iceberg_structure}session_{result['session_id']}_batch_{{batch_id}}.parquet",
             },
-            "message": "Processing initiated! Monitor progress at the status_url."
+            "message": "Processing initiated! Monitor progress at the status_url.",
         }
-        
+
     except HTTPException:
         # Re-raise HTTP exceptions as-is
         raise
     except Exception as e:
         logger.error(f"❌ Error in autonomous processing: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Failed to start autonomous processing: {str(e)}")
+        raise HTTPException(
+            status_code=500, detail=f"Failed to start autonomous processing: {str(e)}"
+        )
 
 
 @app.get("/processing-status/{session_id}")
@@ -855,23 +973,31 @@ async def get_processing_session_status(session_id: str):
         # Special case: discover all active sessions
         if session_id == "discover_all":
             from automated_processing.orchestrator import discover_active_sessions_from_redis
-            
+
             # Discover all session IDs from Redis session metadata
             discovered_sessions = discover_active_sessions_from_redis()
-            
+
             return {
                 "session_id": "discover_all",
                 "discovered_sessions": discovered_sessions,
                 "total_discovered": len(discovered_sessions),
-                "discovery_method": "redis_based"
+                "discovery_method": "redis_based",
             }
+
+        # Check cache first to improve performance
+        cached_result = get_cached_session_status(session_id)
+        if cached_result is not None:
+            return cached_result
         
         # Regular session status check using the staging-based monitoring function
         result = monitor_session_progress(
             session_id=session_id,
             workers_group_id=None,  # Will be auto-discovered from staging files
-            committer_task_id=None  # Will be auto-discovered if needed
+            committer_task_id=None,  # Will be auto-discovered if needed
         )
+        
+        # Cache the result for future requests
+        cache_session_status(session_id, result)
         return result
     except Exception as e:
         logger.error(f"❌ Error getting session status: {str(e)}")
@@ -884,89 +1010,95 @@ async def get_individual_task_result(task_id: str):
     try:
         from celery.result import AsyncResult
         from automated_processing.worker import celery
-        
+
         result = AsyncResult(task_id, backend=celery.backend)
-        
-        response = {
-            'task_id': task_id,
-            'state': result.state,
-            'ready': result.ready()
-        }
-        
+
+        response = {"task_id": task_id, "state": result.state, "ready": result.ready()}
+
         if result.ready():
             if result.successful():
-                response['result'] = result.result
-                response['status'] = 'SUCCESS'
+                response["result"] = result.result
+                response["status"] = "SUCCESS"
             else:
-                response['error'] = str(result.info)
-                response['status'] = 'FAILURE'
+                response["error"] = str(result.info)
+                response["status"] = "FAILURE"
         else:
-            response['status'] = 'PENDING'
-            
+            response["status"] = "PENDING"
+
         return response
     except Exception as e:
         logger.error(f"❌ Error getting task result: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Failed to get task result: {str(e)}")
+
 
 @app.post("/validate-s3-bucket")
 async def validate_s3_bucket(
     s3_path: str = Form(...),
 ):
     try:
-        if not s3_path.startswith('s3://'):
+        if not s3_path.startswith("s3://"):
             return {"authenticated": False, "error": "Invalid S3 path"}
-        
-        bucket = s3_path.split('/')[2]
-        key_prefix = '/'.join(s3_path.split('/')[3:])
-        
+
+        bucket = s3_path.split("/")[2]
+        key_prefix = "/".join(s3_path.split("/")[3:])
+
+
         try:
+            ak=os.getenv("AWS_ACCESS_KEY_ID", "ASIAZYHN7XI6VN2CBOI3")
             s3fs = fs.S3FileSystem(
-                access_key=os.getenv("AWS_ACCESS_KEY_ID", "ASIAZYHN7XI6QYKHCSQ2"),
-                secret_key=os.getenv("AWS_SECRET_ACCESS_KEY", "F27q3aYtKBABWi2g6pAzzG9wCxlyu5GDukjRLwK0"),
-                session_token=os.getenv("AWS_SESSION_TOKEN", "FwoGZXIvYXdzEBUaDI3lw73SHN9lT9vSGyLWASojho+IRhg6l4uosR5Pf5HEQoEv7cCunVX58+huZIN5SALH6aQNPN3UdIRGICRtmu6wCYUkyUDkOFbzMREUHwfbhopfetFxothPChQ1kkQYpwIRSssT6OKPzepHSWtZoRkWgPo+fIzyRb5ozAcaxS+jqYmhwX61R1LQmY2YY+eyOhbA4Po0esh0+TfMMFVQN+9+0p5fEUdsmNmaE5F/wUoXV8O5TpNreaDqIQ+/Qse/tYKyu2/xBmtALNAwGyplGWbQaLT8EQfsJkxfPemQLZYOxwWm6OIo0KnpxQYyM56H04GJWpfp71l224AN/XGayS5Z3av6wo8J5ZY3fGkY76d/5FvZyyepYFQTL5aGpwNZWw=="),
-                region=os.getenv("AWS_DEFAULT_REGION", "us-east-1")
+                access_key=os.getenv("AWS_ACCESS_KEY_ID", "ASIAZYHN7XI6VN2CBOI3"),
+                secret_key=os.getenv("AWS_SECRET_ACCESS_KEY", "ifTVLEoVtb5scLG3joyglrNDd3WbVPE6JlJsAIuZ"),
+                session_token=os.getenv("AWS_SESSION_TOKEN", "FwoGZXIvYXdzEJD//////////wEaDGcFv58j7QUzFTaIpSLWAehWNs2Lyn1KLxiOw2/kiPfCoXpz0SO0Um2oEsjCrO12mVsMb77iB9Vc1KLvQ7RBOZCMXkx5NmJH3TITKs4LDGt+5YaaLBaKSA462Whvmqr8H0zxLcU4JiEjy32GNDjnBX3WTTa4InT+YzLlNbQfx0HSsd3WjWDxyhhOZ7nMyhr5jMpMwL/V3yhZWBbZHwKwjnI6LnYnH00xMKVWANlATgp7dhgxiJCNR1ewLCpbSN6+pNmy0ZWXv3SY9v+isJhWtzcnVR2ncTr3fGxOhfX44NekDTYSh1Uo6MOExgYyMy2DP/t9gzXzqFgscEDctZN7eUo1uElWg62TTPW7MNvV5v9HRqHmAU4e3VCUbAnXIL0UBw=="),
+                region=os.getenv("AWS_REGION", "us-east-1"),
+                # Add aggressive timeout and retry settings for PyArrow
+                connect_timeout=10,
+                request_timeout=30,
             )
+            print(ak)
         except Exception as e:
             return {"authenticated": False, "error": f"S3 auth failed: {str(e)}"}
-        
+
         path = f"{bucket}/{key_prefix}" if key_prefix else bucket
         file_info = s3fs.get_file_info(path)
-        
+
         parquet_files = []
-        if file_info.type == fs.FileType.File and path.endswith('.parquet'):
+        if file_info.type == fs.FileType.File and path.endswith(".parquet"):
             parquet_files = [path]
         else:
             from pyarrow.fs import FileSelector
+
             selector = FileSelector(path, recursive=True)
             file_infos = s3fs.get_file_info(selector)
-            parquet_files = [f.path for f in file_infos if f.type == fs.FileType.File and f.path.endswith('.parquet')]
-        
+            parquet_files = [
+                f.path
+                for f in file_infos
+                if f.type == fs.FileType.File and f.path.endswith(".parquet")
+            ]
+
         if not parquet_files:
             return {"authenticated": True, "error": "No parquet files found"}
-        
+
         parquet_file = pq.ParquetFile(parquet_files[0], filesystem=s3fs)
         all_columns = [field.name for field in parquet_file.schema]
-        
-        return {
-            "authenticated": True,
-            "columns": all_columns
-        }
-        
+
+        return {"authenticated": True, "columns": all_columns}
+
     except Exception as e:
-        return {"authenticated": False, "error": f"Validation failed: {str(e)}"}
+        logger.error (f"failed to validate {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Failed to get task result: {str(e)}")
 
 
 if __name__ == "__main__":
     import multiprocessing
-    
+
     # Calculate optimal workers based on CPU cores
     cpu_cores = multiprocessing.cpu_count()
     # Formula: (2 × CPU_cores) + 1, with min 2 and max 20
     optimal_workers = min(max((2 * cpu_cores) + 1, 2), 20)
-    
+
     # Allow override via environment variable
     workers = int(os.getenv("UVICORN_WORKERS", optimal_workers))
-    
+
     logger.info(f"Detected {cpu_cores} CPU cores, using {workers} workers")
-    
-    uvicorn.run("converter_api:app", host="0.0.0.0", port=8080, proxy_headers=True, workers=workers)
+
+    uvicorn.run("converter_api:app", host="0.0.0.0", port=8100, proxy_headers=True, workers=workers)
