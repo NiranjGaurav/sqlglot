@@ -67,6 +67,28 @@ def commit_session_to_iceberg(
         staged_files = staging.list_staged_files(session_id)
 
         if not staged_files:
+            # Check if session was already completed by looking for manifest with commit data
+            try:
+                from .staging import read_staging_manifest
+                manifest = read_staging_manifest(session_id)
+                
+                if manifest and manifest.get("iceberg_commit"):
+                    # Session was already committed successfully
+                    iceberg_commit = manifest["iceberg_commit"]
+                    logger.info(f"✅ Session {session_id} already completed - no action needed")
+                    return {
+                        "session_id": session_id,
+                        "success": True,
+                        "error": "Session already completed",
+                        "committed_files": iceberg_commit.get("committed_files", 0),
+                        "total_rows": iceberg_commit.get("total_rows", 0),
+                        "commit_duration_seconds": 0,
+                        "already_completed": True,
+                    }
+            except Exception as e:
+                logger.debug(f"Could not check manifest for session {session_id}: {e}")
+            
+            # No staged files and no evidence of completion - this is an error
             logger.warning(f"⚠️ No staged files found for session {session_id}")
             return {
                 "session_id": session_id,

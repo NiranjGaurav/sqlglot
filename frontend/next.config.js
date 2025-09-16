@@ -2,10 +2,14 @@
 const nextConfig = {
   output: 'standalone',
   async rewrites() {
+    // Ensure we get the runtime environment variable
+    const apiUrl = process.env.API_URL || 'http://transpiler:8100'
+    console.log('Next.js rewrites using API_URL:', apiUrl)
+    
     return [
       {
         source: '/api/:path*',
-        destination: process.env.API_URL ? `${process.env.API_URL}/:path*` : 'http://fastapi:8080/:path*', // Proxy to FastAPI service
+        destination: `${apiUrl}/:path*`,
       },
     ]
   },

@@ -966,6 +966,53 @@ async def process_parquet_directory_automated(
         )
 
 
+@app.get("/sessions/list")
+async def list_active_sessions():
+    """Get lightweight list of active sessions with basic info"""
+    try:
+        from automated_processing.orchestrator import discover_active_sessions_from_redis
+        from automated_processing.orchestrator import get_session_metadata_from_redis
+        
+        # Discover all session IDs from Redis
+        discovered_sessions = discover_active_sessions_from_redis()
+        
+        # Get basic info for each session (without heavy status polling)
+        sessions_info = []
+        for session_id in discovered_sessions:
+            try:
+                # Get session metadata (lightweight)
+                metadata = get_session_metadata_from_redis(session_id)
+                
+                # Create basic session info with proper timestamp
+                session_info = {
+                    "session_id": session_id,
+                    "session_name": metadata.get("session_name"),
+                    "company_name": metadata.get("company_name", "Unknown"),
+                    "created_at": metadata.get("created_at"),
+                    "status": "processing",  # Default status, will be updated when selected
+                }
+                sessions_info.append(session_info)
+                
+            except Exception as e:
+                logger.debug(f"Could not get metadata for session {session_id}: {e}")
+                # Add minimal info for sessions without metadata
+                sessions_info.append({
+                    "session_id": session_id,
+                    "session_name": None,
+                    "company_name": "Unknown",
+                    "created_at": None,  # Don't use current time as fallback
+                    "status": "processing",
+                })
+        
+        return {
+            "sessions": sessions_info,
+            "total_sessions": len(sessions_info),
+        }
+        
+    except Exception as e:
+        logger.error(f"❌ Error listing active sessions: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Failed to list sessions: {str(e)}")
+
 @app.get("/processing-status/{session_id}")
 async def get_processing_session_status(session_id: str):
     """Get status of automated processing session or discover all sessions"""
@@ -1044,17 +1091,17 @@ async def validate_s3_bucket(
 
 
         try:
-            ak=os.getenv("AWS_ACCESS_KEY_ID", "ASIAZYHN7XI6VN2CBOI3")
+            #ak=os.getenv("AWS_ACCESS_KEY_ID", "ASIAZYHN7XI6VN2CBOI3")
             s3fs = fs.S3FileSystem(
-                access_key=os.getenv("AWS_ACCESS_KEY_ID", "ASIAZYHN7XI6VN2CBOI3"),
-                secret_key=os.getenv("AWS_SECRET_ACCESS_KEY", "ifTVLEoVtb5scLG3joyglrNDd3WbVPE6JlJsAIuZ"),
-                session_token=os.getenv("AWS_SESSION_TOKEN", "FwoGZXIvYXdzEJD//////////wEaDGcFv58j7QUzFTaIpSLWAehWNs2Lyn1KLxiOw2/kiPfCoXpz0SO0Um2oEsjCrO12mVsMb77iB9Vc1KLvQ7RBOZCMXkx5NmJH3TITKs4LDGt+5YaaLBaKSA462Whvmqr8H0zxLcU4JiEjy32GNDjnBX3WTTa4InT+YzLlNbQfx0HSsd3WjWDxyhhOZ7nMyhr5jMpMwL/V3yhZWBbZHwKwjnI6LnYnH00xMKVWANlATgp7dhgxiJCNR1ewLCpbSN6+pNmy0ZWXv3SY9v+isJhWtzcnVR2ncTr3fGxOhfX44NekDTYSh1Uo6MOExgYyMy2DP/t9gzXzqFgscEDctZN7eUo1uElWg62TTPW7MNvV5v9HRqHmAU4e3VCUbAnXIL0UBw=="),
+                access_key=os.getenv("AWS_ACCESS_KEY_ID"),
+                secret_key=os.getenv("AWS_SECRET_ACCESS_KEY"),
+                session_token=os.getenv("AWS_SESSION_TOKEN"),
                 region=os.getenv("AWS_REGION", "us-east-1"),
                 # Add aggressive timeout and retry settings for PyArrow
                 connect_timeout=10,
                 request_timeout=30,
             )
-            print(ak)
+            #print(ak)
         except Exception as e:
             return {"authenticated": False, "error": f"S3 auth failed: {str(e)}"}
 
