@@ -25,6 +25,7 @@ export interface ProcessingSession {
 
 export interface ProcessingStatus {
   session_id: string
+  session_name?: string
   timestamp: string
   staging_stats: StagingStats
   workers_status: WorkersStatus

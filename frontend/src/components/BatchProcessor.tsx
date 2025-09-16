@@ -150,9 +150,11 @@ export default function BatchProcessor({ onSessionCreated }: BatchProcessorProps
       const sessionData: ProcessingSession = await response.json()
       setResult(sessionData)
       
-      // Notify parent component
+      // Notify parent component and redirect after a brief delay
       if (onSessionCreated) {
-        onSessionCreated(sessionData.session_id)
+        setTimeout(() => {
+          onSessionCreated(sessionData.session_id)
+        }, 2000) // 2 second delay to show success message
       }
 
     } catch (err) {
@@ -405,8 +407,7 @@ export default function BatchProcessor({ onSessionCreated }: BatchProcessorProps
                     {result.total_batches} batches created and queued for processing
                   </p>
                   <p className="text-blue-700 text-xs mt-1">
-                    Switch to the <strong>&ldquo;📊 Processing Results&rdquo;</strong> tab to monitor progress in detail, 
-                    including chunk visualization and real-time status updates.
+                    <span className="animate-pulse">🔄</span> Redirecting to <strong>&ldquo;📊 Processing Results&rdquo;</strong> tab to monitor progress...
                   </p>
                 </div>
               </div>
