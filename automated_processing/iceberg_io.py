@@ -15,18 +15,17 @@ from pyiceberg.partitioning import PartitionSpec, PartitionField
 
 logger = logging.getLogger(__name__)
 
-# AWS Configuration - using environment variables (preferred) or fallback credentials
-AWS_ACCESS_KEY_ID = os.getenv("AWS_ACCESS_KEY_ID", "ASIAZYHN7XI6QYKHCSQ2")
-AWS_SECRET_ACCESS_KEY = os.getenv(
-    "AWS_SECRET_ACCESS_KEY", "F27q3aYtKBABWi2g6pAzzG9wCxlyu5GDukjRLwK0"
-)
-AWS_SESSION_TOKEN = os.getenv(
-    "AWS_SESSION_TOKEN",
-    "FwoGZXIvYXdzEBUaDI3lw73SHN9lT9vSGyLWASojho+IRhg6l4uosR5Pf5HEQoEv7cCunVX58+huZIN5SALH6aQNPN3UdIRGICRtmu6wCYUkyUDkOFbzMREUHwfbhopfetFxothPChQ1kkQYpwIRSssT6OKPzepHSWtZoRkWgPo+fIzyRb5ozAcaxS+jqYmhwX61R1LQmY2YY+eyOhbA4Po0esh0+TfMMFVQN+9+0p5fEUdsmNmaE5F/wUoXV8O5TpNreaDqIQ+/Qse/tYKyu2/xBmtALNAwGyplGWbQaLT8EQfsJkxfPemQLZYOxwWm6OIo0KnpxQYyM56H04GJWpfp71l224AN/XGayS5Z3av6wo8J5ZY3fGkY76d/5FvZyyepYFQTL5aGpwNZWw==",
-)
+# AWS Configuration - ONLY use environment variables (no fallback credentials)
+AWS_ACCESS_KEY_ID = os.getenv("AWS_ACCESS_KEY_ID")
+AWS_SECRET_ACCESS_KEY = os.getenv("AWS_SECRET_ACCESS_KEY")
+AWS_SESSION_TOKEN = os.getenv("AWS_SESSION_TOKEN")
 AWS_REGION = os.getenv("AWS_REGION", "us-east-1")
-S3_WAREHOUSE_PATH = "s3://batch-transpiler/testing-batch-processing/"
+S3_WAREHOUSE_PATH = os.getenv("S3_WAREHOUSE_PATH", "s3://batch-transpiler/testing-batch-processing/")
 ICEBERG_CATALOG_NAME = os.getenv("ICEBERG_CATALOG_NAME", "glue_catalog")
+
+# Validate required AWS credentials
+if not AWS_ACCESS_KEY_ID or not AWS_SECRET_ACCESS_KEY:
+    raise EnvironmentError("AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY environment variables are required")
 
 # Global catalog instance (initialized once per process)
 _iceberg_catalog = None

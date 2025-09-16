@@ -58,7 +58,7 @@ export default function ProcessingResults({ sessionId, refreshTrigger, onRefresh
     if (sessionId) {
       fetchStatus()
     }
-  }, [sessionId, refreshTrigger, fetchStatus])
+  }, [sessionId, refreshTrigger])
 
   // Auto-refresh for active sessions
   useEffect(() => {
@@ -73,10 +73,10 @@ export default function ProcessingResults({ sessionId, refreshTrigger, onRefresh
 
     const interval = setInterval(() => {
       fetchStatus()
-    }, 10000) // Refresh every 10 seconds
+    }, 30000) // Refresh every 30 seconds
 
     return () => clearInterval(interval)
-  }, [autoRefresh, sessionId, status, fetchStatus])
+  }, [autoRefresh, sessionId, status?.overall_status])
 
   const getStatusColor = (status: string) => {
     switch (status.toLowerCase()) {

@@ -1,0 +1,36 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: transpiler
+  namespace: transpiler-prod
+  labels:
+    app: transpiler
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: transpiler
+  template:
+    metadata:
+      labels:
+        app: transpiler
+    spec:
+      containers:
+        - name: transpiler
+          image: {{ printf "%s:%s" .Values.transpiler.image .Values.transpiler.tag }}
+          imagePullPolicy: {{ .Values.transpiler.imagePullPolicy }}
+          ports:
+            - containerPort: {{ .Values.transpiler.service.servicePorts.targetPort }}
+          env:
+            {{- range $k, $v := .Values.transpiler.env}}
+            - name: {{ $k }}
+              value: "{{ $v }}"
+            {{end}}
+          envFrom:
+            - configMapRef:
+                name: app-config
+            {{- if .Values.aws.useSecrets }}
+            - secretRef:
+                name: aws-credentials
+            {{- end }}
+      restartPolicy: Always
