@@ -275,7 +275,16 @@ export default function ActiveSessions({
                           if (!session.created_at) return 'Unknown'
                           try {
                             const date = new Date(session.created_at)
-                            return isNaN(date.getTime()) ? 'Unknown' : date.toLocaleString()
+                            return isNaN(date.getTime()) ? 'Unknown' : date.toLocaleString('en-IN', {
+                              year: 'numeric',
+                              month: '2-digit',
+                              day: '2-digit',
+                              hour: '2-digit',
+                              minute: '2-digit',
+                              second: '2-digit',
+                              hour12: false,
+                              timeZone: 'Asia/Kolkata'
+                            })
                           } catch {
                             return 'Unknown'
                           }

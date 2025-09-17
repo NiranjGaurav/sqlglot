@@ -1,15 +1,15 @@
 namespace: transpiler-prod
 
-transpiler:
-  image: 670514002493.dkr.ecr.us-east-1.amazonaws.com/transpiler
+automatedApi:
+  image: 670514002493.dkr.ecr.us-east-1.amazonaws.com/automated-api
   tag: test
   replicaCount: 1
   imagePullPolicy: Always
   service:
     type: LoadBalancer
     servicePorts:
-      port: 8100
-      targetPort: 8100
+      port: 8101
+      targetPort: 8101
   env:
     CELERY_BROKER_URL : "redis://redis:6379/0"
     CELERY_RESULT_BACKEND : "redis://redis:6379/0"
@@ -36,7 +36,7 @@ frontend:
       targetPort: 3000
   env:
     NODE_ENV : "production"
-    API_URL: "http://transpiler:8100"
+    API_URL: "http://automated-api:8101"
   resources:
     requests:
       memory: "256Mi"

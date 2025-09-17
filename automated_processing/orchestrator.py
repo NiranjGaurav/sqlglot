@@ -33,7 +33,7 @@ logger = logging.getLogger(__name__)
 def get_redis_connection():
     """Get Redis connection using environment variables or defaults"""
     import redis
-    
+
     # Parse Redis URL from CELERY_BROKER_URL if available
     broker_url = os.getenv("CELERY_BROKER_URL", "redis://localhost:6379/0")
     if broker_url.startswith("redis://"):
@@ -48,7 +48,7 @@ def get_redis_connection():
     else:
         host = "localhost"
         port = 6379
-    
+
     return redis.Redis(host=host, port=port, db=0)
 
 
@@ -375,6 +375,7 @@ def get_session_metadata_from_redis(session_id: str) -> Dict[str, Any]:
     """Get session metadata from Redis"""
     try:
         import redis
+
         # Use the same Redis connection logic as elsewhere
         r = get_redis_connection()
         r.decode_responses = True  # Enable decode_responses for this connection
@@ -384,6 +385,7 @@ def get_session_metadata_from_redis(session_id: str) -> Dict[str, Any]:
     except Exception as e:
         logger.debug(f"Could not retrieve session metadata for {session_id}: {e}")
         return {}
+
 
 def monitor_session_progress(
     session_id: str, workers_group_id: Optional[str] = None, committer_task_id: Optional[str] = None
@@ -402,7 +404,7 @@ def monitor_session_progress(
     try:
         # Get session metadata
         session_metadata = get_session_metadata_from_redis(session_id)
-        
+
         # Get staging statistics
         staging_stats = get_staging_statistics(session_id)
 
@@ -500,10 +502,14 @@ def monitor_session_progress(
                     "status": committer_result.status,
                     "result": committer_result.result if committer_result.ready() else None,
                 }
-                
+
                 # Extract validation results from successful committer result
-                if (committer_result.ready() and committer_result.successful() and 
-                    committer_result.result and committer_result.result.get("validation_results")):
+                if (
+                    committer_result.ready()
+                    and committer_result.successful()
+                    and committer_result.result
+                    and committer_result.result.get("validation_results")
+                ):
                     validation_result = committer_result.result["validation_results"]
             except Exception as e:
                 committer_status = {"status": "error", "error": str(e)}
@@ -767,7 +773,7 @@ def monitor_session_progress(
                             },
                         }
 
-                        # Update validation result for completed session  
+                        # Update validation result for completed session
                         # Try to get validation results from committer first
                         if iceberg_commit.get("validation_results"):
                             validation_result = iceberg_commit["validation_results"]

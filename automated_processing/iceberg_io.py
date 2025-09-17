@@ -20,12 +20,16 @@ AWS_ACCESS_KEY_ID = os.getenv("AWS_ACCESS_KEY_ID")
 AWS_SECRET_ACCESS_KEY = os.getenv("AWS_SECRET_ACCESS_KEY")
 AWS_SESSION_TOKEN = os.getenv("AWS_SESSION_TOKEN")
 AWS_REGION = os.getenv("AWS_REGION", "us-east-1")
-S3_WAREHOUSE_PATH = os.getenv("S3_WAREHOUSE_PATH", "s3://batch-transpiler/testing-batch-processing/")
+S3_WAREHOUSE_PATH = os.getenv(
+    "S3_WAREHOUSE_PATH", "s3://batch-transpiler/testing-batch-processing/"
+)
 ICEBERG_CATALOG_NAME = os.getenv("ICEBERG_CATALOG_NAME", "glue_catalog")
 
 # Validate required AWS credentials
 if not AWS_ACCESS_KEY_ID or not AWS_SECRET_ACCESS_KEY:
-    raise EnvironmentError("AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY environment variables are required")
+    raise EnvironmentError(
+        "AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY environment variables are required"
+    )
 
 # Global catalog instance (initialized once per process)
 _iceberg_catalog = None
@@ -58,13 +62,10 @@ def get_iceberg_catalog():
                 "s3.session-token": AWS_SESSION_TOKEN,
                 "s3.region": AWS_REGION,
             }
-            
+
             logger.info(f"Catalog config keys: {list(catalog_config.keys())}")
-            
-            _iceberg_catalog = load_catalog(
-                name=ICEBERG_CATALOG_NAME,
-                **catalog_config
-            )
+
+            _iceberg_catalog = load_catalog(name=ICEBERG_CATALOG_NAME, **catalog_config)
 
             logger.info("✅ AWS Glue Iceberg catalog initialized successfully")
 

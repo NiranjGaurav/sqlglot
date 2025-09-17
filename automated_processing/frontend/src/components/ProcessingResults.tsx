@@ -669,14 +669,15 @@ export default function ProcessingResults({ sessionId, refreshTrigger, onRefresh
           <div>
             <span className="font-medium text-gray-700">Last Updated:</span>
             <span className="ml-2 text-gray-600">
-              {new Date(status.timestamp).toLocaleString('en-US', {
+              {new Date(status.timestamp).toLocaleString('en-IN', {
                 year: 'numeric',
                 month: '2-digit', 
                 day: '2-digit',
                 hour: '2-digit',
                 minute: '2-digit',
                 second: '2-digit',
-                hour12: false
+                hour12: false,
+                timeZone: 'Asia/Kolkata'
               })}
             </span>
           </div>

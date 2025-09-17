@@ -1,28 +1,28 @@
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: transpiler
+  name: automated-api
   namespace: transpiler-prod
   labels:
-    app: transpiler
+    app: automated-api
 spec:
   replicas: 1
   selector:
     matchLabels:
-      app: transpiler
+      app: automated-api
   template:
     metadata:
       labels:
-        app: transpiler
+        app: automated-api
     spec:
       containers:
-        - name: transpiler
-          image: {{ printf "%s:%s" .Values.transpiler.image .Values.transpiler.tag }}
-          imagePullPolicy: {{ .Values.transpiler.imagePullPolicy }}
+        - name: automated-api
+          image: {{ printf "%s:%s" .Values.automatedApi.image .Values.automatedApi.tag }}
+          imagePullPolicy: {{ .Values.automatedApi.imagePullPolicy }}
           ports:
-            - containerPort: {{ .Values.transpiler.service.servicePorts.targetPort }}
+            - containerPort: {{ .Values.automatedApi.service.servicePorts.targetPort }}
           env:
-            {{- range $k, $v := .Values.transpiler.env}}
+            {{- range $k, $v := .Values.automatedApi.env}}
             - name: {{ $k }}
               value: "{{ $v }}"
             {{end}}
