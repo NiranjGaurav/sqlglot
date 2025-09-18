@@ -19,6 +19,9 @@ interface SessionData {
   total_tasks?: number
   created_at: string | null
   currentStatus?: ProcessingStatus
+  processing_duration?: number
+  total_queries?: number
+  successful_queries?: number
 }
 
 export default function ActiveSessions({ 
@@ -32,7 +35,7 @@ export default function ActiveSessions({
   const [error, setError] = useState<string | null>(null)
   const [searchTerm, setSearchTerm] = useState('')
 
-  // Fetch lightweight session list
+  // Fetch session list with real status
   const fetchSessions = async () => {
     setLoading(true)
     setError(null)
@@ -53,18 +56,90 @@ export default function ActiveSessions({
       const data = await response.json()
       const sessions = data.sessions || []
       
-      // Convert to our SessionData format
+      // Convert to our SessionData format with default status
       const sessionData: SessionData[] = sessions.map((session: any) => ({
         id: session.session_id,
         company_name: session.company_name,
         session_name: session.session_name,
         status: session.status,
-        created_at: session.created_at, // Keep null if not available
-        // Don't load full status until selected
+        created_at: session.created_at,
         currentStatus: undefined
       }))
       
       setSessions(sessionData)
+      
+      // Fetch real status for all sessions to fix the visual bug
+      const statusPromises = sessionData.map(async (session) => {
+        try {
+          const statusResponse = await fetch(`/api/processing-status/${session.id}?_=${Date.now()}`, {
+            cache: 'no-cache',
+            headers: {
+              'Cache-Control': 'no-cache, no-store, must-revalidate',
+              'Pragma': 'no-cache'
+            }
+          })
+          
+          if (statusResponse.ok) {
+            const status = await statusResponse.json()
+            
+            // Extract timing and metadata information
+            const metadata = status.staging_stats?.manifest_data?.metadata?.metadata
+            const committerResult = status.committer_status?.result
+            
+            // Calculate processing duration
+            let processingDuration = undefined
+            if (metadata?.created_at && metadata?.staging_completed_at) {
+              const startTime = new Date(metadata.created_at).getTime()
+              const endTime = new Date(metadata.staging_completed_at).getTime()
+              processingDuration = Math.round((endTime - startTime) / 1000) // in seconds
+            }
+            
+            // Add commit duration if available
+            if (committerResult?.total_commit_duration_seconds && processingDuration) {
+              processingDuration += Math.round(committerResult.total_commit_duration_seconds)
+            }
+            
+            return {
+              sessionId: session.id,
+              status: status.overall_status || 'processing',
+              completed_tasks: status.workers_status?.completed_tasks,
+              total_tasks: status.workers_status?.total_tasks,
+              currentStatus: status,
+              processing_duration: processingDuration,
+              total_queries: metadata?.total_queries_processed,
+              successful_queries: metadata?.total_queries_successful,
+              created_at: metadata?.created_at || null
+            }
+          }
+        } catch (error) {
+          console.warn(`Failed to get status for session ${session.id}:`, error)
+        }
+        return null
+      })
+      
+      // Update sessions with real status as they become available
+      const statusResults = await Promise.allSettled(statusPromises)
+      
+      setSessions(prev => prev.map(session => {
+        const statusIndex = sessionData.findIndex(s => s.id === session.id)
+        const statusResult = statusResults[statusIndex]
+        
+        if (statusResult.status === 'fulfilled' && statusResult.value) {
+          const statusData = statusResult.value
+          return {
+            ...session,
+            status: statusData.status,
+            completed_tasks: statusData.completed_tasks,
+            total_tasks: statusData.total_tasks,
+            currentStatus: statusData.currentStatus,
+            processing_duration: statusData.processing_duration,
+            total_queries: statusData.total_queries,
+            successful_queries: statusData.successful_queries,
+            created_at: statusData.created_at || session.created_at
+          }
+        }
+        return session
+      }))
       
     } catch (error) {
       console.error('Failed to fetch sessions:', error)
@@ -262,12 +337,41 @@ export default function ActiveSessions({
                         ID: {session.id}
                       </p>
                     )}
-                    <div className={`text-xs mt-2 ${
+                    <div className={`text-xs mt-2 space-y-1 ${
                       isSelected ? 'text-primary-600' : 'text-gray-500'
                     }`}>
                       {session.completed_tasks !== undefined && session.total_tasks !== undefined && (
                         <div>
                           Tasks: {session.completed_tasks}/{session.total_tasks}
+                        </div>
+                      )}
+                      {session.total_queries && (
+                        <div className="flex items-center space-x-3">
+                          <span>
+                            📊 {session.total_queries.toLocaleString()} queries
+                          </span>
+                          {session.successful_queries && (
+                            <span className="text-success-600">
+                              ✅ {session.successful_queries.toLocaleString()} success
+                            </span>
+                          )}
+                        </div>
+                      )}
+                      {session.processing_duration && (
+                        <div>
+                          ⏱️ Duration: {(() => {
+                            const hours = Math.floor(session.processing_duration / 3600)
+                            const minutes = Math.floor((session.processing_duration % 3600) / 60)
+                            const seconds = session.processing_duration % 60
+                            
+                            if (hours > 0) {
+                              return `${hours}h ${minutes}m ${seconds}s`
+                            } else if (minutes > 0) {
+                              return `${minutes}m ${seconds}s`
+                            } else {
+                              return `${seconds}s`
+                            }
+                          })()}
                         </div>
                       )}
                       <div>

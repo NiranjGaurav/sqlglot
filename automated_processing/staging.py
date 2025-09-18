@@ -12,17 +12,12 @@ import s3fs
 
 logger = logging.getLogger(__name__)
 
-# S3 Configuration - using environment variables (preferred) or fallback credentials
+# S3 Configuration
 S3_BUCKET = os.getenv("S3_BUCKET", "batch-transpiler")
 S3_STAGING_PREFIX = os.getenv("S3_STAGING_PREFIX", "staging")
-AWS_ACCESS_KEY_ID = os.getenv("AWS_ACCESS_KEY_ID", "ASIAZYHN7XI6QYKHCSQ2")
-AWS_SECRET_ACCESS_KEY = os.getenv(
-    "AWS_SECRET_ACCESS_KEY", "F27q3aYtKBABWi2g6pAzzG9wCxlyu5GDukjRLwK0"
-)
-AWS_SESSION_TOKEN = os.getenv(
-    "AWS_SESSION_TOKEN",
-    "FwoGZXIvYXdzEBUaDI3lw73SHN9lT9vSGyLWASojho+IRhg6l4uosR5Pf5HEQoEv7cCunVX58+huZIN5SALH6aQNPN3UdIRGICRtmu6wCYUkyUDkOFbzMREUHwfbhopfetFxothPChQ1kkQYpwIRSssT6OKPzepHSWtZoRkWgPo+fIzyRb5ozAcaxS+jqYmhwX61R1LQmY2YY+eyOhbA4Po0esh0+TfMMFVQN+9+0p5fEUdsmNmaE5F/wUoXV8O5TpNreaDqIQ+/Qse/tYKyu2/xBmtALNAwGyplGWbQaLT8EQfsJkxfPemQLZYOxwWm6OIo0KnpxQYyM56H04GJWpfp71l224AN/XGayS5Z3av6wo8J5ZY3fGkY76d/5FvZyyepYFQTL5aGpwNZWw==",
-)
+AWS_ACCESS_KEY_ID = os.getenv("AWS_ACCESS_KEY_ID")
+AWS_SECRET_ACCESS_KEY = os.getenv("AWS_SECRET_ACCESS_KEY")
+AWS_SESSION_TOKEN = os.getenv("AWS_SESSION_TOKEN")
 AWS_REGION = os.getenv("AWS_REGION", "us-east-1")
 
 
@@ -50,18 +45,6 @@ def generate_manifest_path(session_id: str) -> str:
 def write_native_data_to_staging(
     data: Dict[str, list], session_id: str, batch_id: int, metadata: Optional[Dict[str, Any]] = None
 ) -> str:
-    """
-    Write native Python data to S3 staging area as Parquet
-
-    Args:
-        data: Dictionary of column_name -> list of values (native Python types)
-        session_id: Session identifier
-        batch_id: Batch identifier
-        metadata: Optional metadata
-
-    Returns:
-        str: S3 path where file was written
-    """
     # Import PyArrow inside function to prevent segfaults in multiprocessing
     import pyarrow as pa
     import pyarrow.parquet as pq
@@ -123,12 +106,6 @@ def write_native_data_to_staging(
 def write_parquet_to_staging(
     table, session_id: str, batch_id: int, metadata: Optional[Dict[str, Any]] = None
 ) -> str:
-    """
-    Write PyArrow table to S3 staging area
-
-    Returns:
-        str: S3 path where file was written
-    """
     # Import PyArrow inside function to prevent segfaults in multiprocessing
     import pyarrow.parquet as pq
 
@@ -160,12 +137,6 @@ def write_parquet_to_staging(
 
 
 def list_staged_files(session_id: str) -> List[str]:
-    """
-    List all staged Parquet files for a session
-
-    Returns:
-        List[str]: List of S3 paths to staged files
-    """
     s3fs = get_s3_filesystem()
     staging_prefix = f"{S3_BUCKET}/{S3_STAGING_PREFIX}/{session_id}/"
 
@@ -204,17 +175,6 @@ def list_staged_files(session_id: str) -> List[str]:
 def write_staging_manifest(
     session_id: str, staged_files: List[str], metadata: Dict[str, Any]
 ) -> str:
-    """
-    Write manifest.json with staging information
-
-    Args:
-        session_id: Session identifier
-        staged_files: List of S3 paths to staged files
-        metadata: Additional metadata to store
-
-    Returns:
-        str: S3 path to manifest file
-    """
     manifest_path = generate_manifest_path(session_id)
     s3fs = get_s3_filesystem()
 
@@ -241,12 +201,6 @@ def write_staging_manifest(
 
 
 def read_staging_manifest(session_id: str) -> Optional[Dict[str, Any]]:
-    """
-    Read staging manifest for a session
-
-    Returns:
-        Dict or None if manifest doesn't exist
-    """
     manifest_path = generate_manifest_path(session_id)
     s3fs = get_s3_filesystem()
 
@@ -273,16 +227,6 @@ def read_staging_manifest(session_id: str) -> Optional[Dict[str, Any]]:
 
 
 def cleanup_staging_files(session_id: str, keep_manifest: bool = False) -> bool:
-    """
-    Clean up staging files after successful commit
-
-    Args:
-        session_id: Session identifier
-        keep_manifest: Whether to keep the manifest file
-
-    Returns:
-        bool: True if cleanup was successful
-    """
     s3fs = get_s3_filesystem()
     staging_prefix = f"{S3_BUCKET}/{S3_STAGING_PREFIX}/{session_id}/"
 
@@ -317,12 +261,6 @@ def cleanup_staging_files(session_id: str, keep_manifest: bool = False) -> bool:
 
 
 def get_staging_statistics(session_id: str) -> Dict[str, Any]:
-    """
-    Get statistics about staged files for a session
-
-    Returns:
-        Dict with statistics about staged files
-    """
     staged_files = list_staged_files(session_id)
     manifest = read_staging_manifest(session_id)
 
@@ -363,12 +301,6 @@ def get_staging_statistics(session_id: str) -> Dict[str, Any]:
 
 
 def validate_staged_files(session_id: str) -> Dict[str, Any]:
-    """
-    Validate that all staged files are readable and valid Parquet
-
-    Returns:
-        Dict with validation results
-    """
     # Import PyArrow inside function to prevent segfaults in multiprocessing
     import pyarrow.parquet as pq
 

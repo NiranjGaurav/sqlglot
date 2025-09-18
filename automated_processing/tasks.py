@@ -1,8 +1,3 @@
-"""
-Task Management for Automated Processing
-Handles task creation and orchestration following TestDriven.io patterns
-Supports both local files and S3 paths with temporary credentials
-"""
 
 import logging
 import os
@@ -18,23 +13,12 @@ logger = logging.getLogger(__name__)
 
 
 def get_filesystem(path: str) -> Optional[fs.FileSystem]:
-    """
-    Get appropriate filesystem based on path (S3 or local)
-    """
     if path.startswith("s3://"):
-        # AWS credentials from environment variables
-        import os
-
         s3fs = fs.S3FileSystem(
-            access_key=os.getenv("AWS_ACCESS_KEY_ID", "ASIAZYHN7XI6QYKHCSQ2"),
-            secret_key=os.getenv(
-                "AWS_SECRET_ACCESS_KEY", "F27q3aYtKBABWi2g6pAzzG9wCxlyu5GDukjRLwK0"
-            ),
-            session_token=os.getenv(
-                "AWS_SESSION_TOKEN",
-                "FwoGZXIvYXdzEBUaDI3lw73SHN9lT9vSGyLWASojho+IRhg6l4uosR5Pf5HEQoEv7cCunVX58+huZIN5SALH6aQNPN3UdIRGICRtmu6wCYUkyUDkOFbzMREUHwfbhopfetFxothPChQ1kkQYpwIRSssT6OKPzepHSWtZoRkWgPo+fIzyRb5ozAcaxS+jqYmhwX61R1LQmY2YY+eyOhbA4Po0esh0+TfMMFVQN+9+0p5fEUdsmNmaE5F/wUoXV8O5TpNreaDqIQ+/Qse/tYKyu2/xBmtALNAwGyplGWbQaLT8EQfsJkxfPemQLZYOxwWm6OIo0KnpxQYyM56H04GJWpfp71l224AN/XGayS5Z3av6wo8J5ZY3fGkY76d/5FvZyyepYFQTL5aGpwNZWw==",
-            ),
-            region="us-east-1",
+            access_key=os.getenv("AWS_ACCESS_KEY_ID"),
+            secret_key=os.getenv("AWS_SECRET_ACCESS_KEY"),
+            session_token=os.getenv("AWS_SESSION_TOKEN"),
+            region=os.getenv("AWS_REGION", "us-east-1"),
             connect_timeout=30,
             request_timeout=60,
         )
@@ -43,12 +27,6 @@ def get_filesystem(path: str) -> Optional[fs.FileSystem]:
 
 
 def discover_parquet_files(directory_path: str, query_column: str) -> List[str]:
-    """
-    Simplified parquet file discovery
-    Step 1: Check S3 vs local path
-    Step 2: Check if single file or directory
-    Step 3: Add all parquet files to list
-    """
     parquet_files = []
 
     # Step 1: Check whether it's S3 or local path
@@ -57,15 +35,11 @@ def discover_parquet_files(directory_path: str, query_column: str) -> List[str]:
         filesystem = get_filesystem(directory_path)
         bucket_and_key = directory_path.replace("s3://", "").rstrip("/")
 
-        # Step 2: Check if single file or directory
-        import pyarrow.fs as fs
-
         file_info = filesystem.get_file_info(bucket_and_key)
 
         if file_info.type == fs.FileType.File:
-            # Single parquet file
-            if bucket_and_key.endswith(".parquet"):
-                parquet_files = [f"s3://{bucket_and_key}"]
+                if bucket_and_key.endswith(".parquet"):
+                    parquet_files = [f"s3://{bucket_and_key}"]
         else:
             # Step 3: Directory - add all parquet files
             from pyarrow.fs import FileSelector
@@ -80,11 +54,9 @@ def discover_parquet_files(directory_path: str, query_column: str) -> List[str]:
         # Local path
         path = Path(directory_path)
 
-        # Step 2: Check if single file or directory
         if path.is_file():
-            # Single parquet file
-            if path.suffix.lower() == ".parquet":
-                parquet_files = [str(path)]
+                if path.suffix.lower() == ".parquet":
+                    parquet_files = [str(path)]
         elif path.is_dir():
             # Step 3: Directory - add all parquet files
             parquet_files = [str(p) for p in path.glob("*.parquet")]
@@ -95,10 +67,6 @@ def discover_parquet_files(directory_path: str, query_column: str) -> List[str]:
 def extract_unique_queries_from_file(
     file_path: str, query_column: str, filters: Dict[str, Any]
 ) -> pa.Table:
-    """
-    Step 1: Read only query column, get unique queries
-    Step 2: Push filters using PyArrow operations
-    """
     try:
         import pyarrow.dataset as ds
         import s3fs
@@ -107,18 +75,11 @@ def extract_unique_queries_from_file(
 
         # Create dataset
         if file_path.startswith("s3://"):
-            import os
-
             s3fs_fs = s3fs.S3FileSystem(
-                key=os.getenv("AWS_ACCESS_KEY_ID", "ASIAZYHN7XI6QYKHCSQ2"),
-                secret=os.getenv(
-                    "AWS_SECRET_ACCESS_KEY", "F27q3aYtKBABWi2g6pAzzG9wCxlyu5GDukjRLwK0"
-                ),
-                token=os.getenv(
-                    "AWS_SESSION_TOKEN",
-                    "FwoGZXIvYXdzEBUaDI3lw73SHN9lT9vSGyLWASojho+IRhg6l4uosR5Pf5HEQoEv7cCunVX58+huZIN5SALH6aQNPN3UdIRGICRtmu6wCYUkyUDkOFbzMREUHwfbhopfetFxothPChQ1kkQYpwIRSssT6OKPzepHSWtZoRkWgPo+fIzyRb5ozAcaxS+jqYmhwX61R1LQmY2YY+eyOhbA4Po0esh0+TfMMFVQN+9+0p5fEUdsmNmaE5F/wUoXV8O5TpNreaDqIQ+/Qse/tYKyu2/xBmtALNAwGyplGWbQaLT8EQfsJkxfPemQLZYOxwWm6OIo0KnpxQYyM56H04GJWpfp71l224AN/XGayS5Z3av6wo8J5ZY3fGkY76d/5FvZyyepYFQTL5aGpwNZWw==",
-                ),
-                client_kwargs={"region_name": "us-east-1"},
+                key=os.getenv("AWS_ACCESS_KEY_ID"),
+                secret=os.getenv("AWS_SECRET_ACCESS_KEY"),
+                token=os.getenv("AWS_SESSION_TOKEN"),
+                client_kwargs={"region_name": os.getenv("AWS_REGION", "us-east-1")},
                 config_kwargs={"connect_timeout": 30, "read_timeout": 60},
             )
             dataset = ds.dataset(file_path, filesystem=s3fs_fs)
@@ -170,9 +131,6 @@ def create_query_batch_configs(
     batch_size: int,
     file_config: Dict[str, Any],
 ) -> tuple[pa.Table, Dict[str, Any]]:
-    """
-    Initialize PyArrow table first, then append to query arrays directly
-    """
     if len(unique_table) == 0:
         logger.warning("Empty unique_table provided")
         return pa.table({}), {}
