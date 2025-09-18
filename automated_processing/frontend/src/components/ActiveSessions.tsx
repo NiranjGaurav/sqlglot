@@ -274,8 +274,25 @@ export default function ActiveSessions({
                         Started: {(() => {
                           if (!session.created_at) return 'Unknown'
                           try {
-                            const date = new Date(session.created_at)
-                            return isNaN(date.getTime()) ? 'Unknown' : date.toLocaleString('en-IN', {
+                            let dateToUse = session.created_at;
+                            
+                            // Handle IST timestamps properly - if no timezone info, assume IST
+                            if (!session.created_at.includes('+') && !session.created_at.includes('Z')) {
+                              dateToUse = session.created_at + '+05:30';
+                            }
+                            
+                            const date = new Date(dateToUse);
+                            if (isNaN(date.getTime())) {
+                              // Fallback: try to extract readable date parts
+                              if (session.created_at.includes('T')) {
+                                const datePart = session.created_at.split('T')[0];
+                                const timePart = session.created_at.split('T')[1]?.split('.')[0] || '';
+                                return `${datePart} ${timePart} IST`;
+                              }
+                              return 'Unknown';
+                            }
+                            
+                            return date.toLocaleString('en-IN', {
                               year: 'numeric',
                               month: '2-digit',
                               day: '2-digit',
@@ -285,7 +302,13 @@ export default function ActiveSessions({
                               hour12: false,
                               timeZone: 'Asia/Kolkata'
                             })
-                          } catch {
+                          } catch (error) {
+                            console.warn('Timestamp parsing error:', error, 'for timestamp:', session.created_at);
+                            // Final fallback
+                            if (session.created_at.includes('T')) {
+                              const datePart = session.created_at.split('T')[0];
+                              return `${datePart} (IST)`;
+                            }
                             return 'Unknown'
                           }
                         })()}

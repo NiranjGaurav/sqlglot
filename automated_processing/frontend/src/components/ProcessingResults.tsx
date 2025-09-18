@@ -60,20 +60,30 @@ export default function ProcessingResults({ sessionId, refreshTrigger, onRefresh
     }
   }, [sessionId, refreshTrigger])
 
-  // Auto-refresh for active sessions
+  // Auto-refresh for active sessions and unknown status
   useEffect(() => {
     if (!autoRefresh || !sessionId || !status) return
 
-    // Only auto-refresh if session is still active
-    const isActive = status.overall_status === 'processing' || 
-                    status.overall_status === 'committing' || 
-                    status.overall_status === 'staged_ready_for_commit'
+    // Auto-refresh for active sessions and unknown status (to detect completion)
+    const shouldRefresh = status.overall_status === 'processing' || 
+                         status.overall_status === 'committing' || 
+                         status.overall_status === 'staged_ready_for_commit' ||
+                         status.overall_status === 'unknown' // Check unknown status for completion detection
 
-    if (!isActive) return
+    if (!shouldRefresh) return
+
+    // Use different intervals based on status
+    const getRefreshInterval = (status: string) => {
+      switch (status) {
+        case 'unknown': return 15000 // Check every 15 seconds for unknown status
+        case 'committing': return 10000 // Check more frequently during commit
+        default: return 30000 // Default 30 seconds
+      }
+    }
 
     const interval = setInterval(() => {
       fetchStatus()
-    }, 30000) // Refresh every 30 seconds
+    }, getRefreshInterval(status.overall_status))
 
     return () => clearInterval(interval)
   }, [autoRefresh, sessionId, status?.overall_status])

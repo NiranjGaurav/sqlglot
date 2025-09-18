@@ -11,6 +11,7 @@ import json
 import logging
 from datetime import datetime
 import time
+import pytz
 
 # Setup logging
 logging.basicConfig(level=logging.INFO)
@@ -25,6 +26,13 @@ from automated_processing.orchestrator import (
     orchestrate_staging_based_processing,
     monitor_session_progress,
 )
+
+# IST timezone
+IST = pytz.timezone('Asia/Kolkata')
+
+def get_ist_timestamp():
+    """Get current timestamp in Indian Standard Time"""
+    return datetime.now(IST).isoformat()
 
 # Simple cache for session status to improve performance
 _session_status_cache = {}
@@ -129,7 +137,7 @@ async def process_parquet_directory_automated(
 
         # Process all files and collect batch configs (same as original orchestrator)
         all_batch_configs = []
-        session_id = f"api_session_{int(datetime.now().timestamp())}"
+        session_id = f"api_session_{int(datetime.now(IST).timestamp())}"
 
         for file_path in file_paths:
             file_name = os.path.basename(file_path)
@@ -192,7 +200,7 @@ async def process_parquet_directory_automated(
             "batch_size": batch_size,
             "filters": filter_dict,
             "session_name": session_name.strip() if session_name else None,
-            "created_at": datetime.now().isoformat(),
+            "created_at": get_ist_timestamp(),
             "directory_path": directory_path.strip(),
         }
 
@@ -212,8 +220,8 @@ async def process_parquet_directory_automated(
 
         logger.info(f"✅ Processing started with session {result['session_id']}")
 
-        # Fixed Iceberg storage structure
-        event_date = datetime.now().strftime("%Y-%m-%d")
+        # Fixed Iceberg storage structure - use IST for event_date
+        event_date = datetime.now(IST).strftime("%Y-%m-%d")
         iceberg_structure = f"company_name={company_name}/event_date={event_date}/"
 
         logger.info(f"📂 Iceberg structure: {iceberg_structure}")
@@ -451,7 +459,7 @@ def health_check():
     """Enhanced health check including Iceberg and Redis connectivity"""
     health_status = {
         "status": "healthy",
-        "timestamp": datetime.now().isoformat(),
+        "timestamp": get_ist_timestamp(),
         "services": {}
     }
     
@@ -521,7 +529,7 @@ def health_check():
         return Response(
             content=json.dumps({
                 "status": "error",
-                "timestamp": datetime.now().isoformat(),
+                "timestamp": get_ist_timestamp(),
                 "error": str(e)
             }),
             status_code=500,

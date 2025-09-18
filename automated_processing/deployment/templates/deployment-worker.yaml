@@ -43,10 +43,6 @@ spec:
             - secretRef:
                 name: aws-credentials
             {{- end }}
-          {{- if .Values.worker.resources }}
-          resources:
-            {{ toYaml .Values.worker.resources | nindent 12 }}
-          {{- end }}
 
 ---
 

@@ -7,8 +7,16 @@ import logging
 import os
 from typing import List, Dict, Any, Optional
 from datetime import datetime
+import pytz
 from celery import group, chord
 from celery.result import AsyncResult, GroupResult
+
+# IST timezone
+IST = pytz.timezone('Asia/Kolkata')
+
+def get_ist_timestamp():
+    """Get current timestamp in Indian Standard Time"""
+    return datetime.now(IST).isoformat()
 
 # Import Celery app and tasks
 try:
@@ -186,7 +194,10 @@ def orchestrate_staging_based_processing(
 
                 r = get_redis_connection()
                 session_meta_key = f"session_meta_{session_id}"
-                r.hset(session_meta_key, "start_time", datetime.now().isoformat())
+                # Use IST timestamp and consistent field names with frontend expectations
+                ist_timestamp = get_ist_timestamp()
+                r.hset(session_meta_key, "start_time", ist_timestamp)
+                r.hset(session_meta_key, "created_at", ist_timestamp)  # Frontend expects this field
                 r.hset(session_meta_key, "total_batches", len(batches_data))
                 r.hset(
                     session_meta_key,
@@ -379,7 +390,8 @@ def get_session_metadata_from_redis(session_id: str) -> Dict[str, Any]:
         # Use the same Redis connection logic as elsewhere
         r = get_redis_connection()
         r.decode_responses = True  # Enable decode_responses for this connection
-        metadata_key = f"session:{session_id}:metadata"
+        # Fix: Use the same key format as used in storage (session_meta_*)
+        metadata_key = f"session_meta_{session_id}"
         metadata = r.hgetall(metadata_key)
         return metadata
     except Exception as e:
@@ -875,7 +887,7 @@ def monitor_session_progress(
         return {
             "session_id": session_id,
             "session_name": session_metadata.get("session_name"),
-            "timestamp": datetime.now().isoformat(),
+            "timestamp": get_ist_timestamp(),
             "staging_stats": staging_stats,
             "workers_status": workers_status,
             "committer_status": committer_status,
@@ -890,7 +902,7 @@ def monitor_session_progress(
             "session_id": session_id,
             "status": "monitoring_error",
             "error": str(e),
-            "timestamp": datetime.now().isoformat(),
+            "timestamp": get_ist_timestamp(),
         }
 
 

@@ -8,10 +8,10 @@ RUN apk add --no-cache gcc g++ cmake make libxml2-dev libxslt-dev openssl && \
     adduser --home /app e6 --disabled-password
 
 # Copy the main requirements file from the root (includes automated_processing dependencies)
-COPY requirements.txt .
+COPY requirements_bp.txt .
 
 # Install any dependencies
-RUN pip install --no-cache-dir -r requirements.txt
+RUN pip install --no-cache-dir -r requirements_bp.txt
 
 # Install specific FastAPI, Uvicorn, and multipart dependencies
 RUN pip install fastapi==0.115.6 uvicorn==0.32.0 python-multipart 

@@ -74,5 +74,5 @@ HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
 CMD ["celery", "-A", "worker.celery", "worker", \
      "--loglevel=info", \
      "--pool=prefork", \
-     "--autoscale=8,1", \
+     "--autoscale=4,1", \
      "-Q", "processing_queue"]

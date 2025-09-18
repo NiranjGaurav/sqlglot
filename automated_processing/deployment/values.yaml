@@ -1,8 +1,8 @@
 namespace: transpiler-prod
 
 automatedApi:
-  image: 670514002493.dkr.ecr.us-east-1.amazonaws.com/automated-api
-  tag: test
+  image: 670514002493.dkr.ecr.us-east-1.amazonaws.com/streamlit
+  tag: transpiler
   replicaCount: 1
   imagePullPolicy: Always
   service:
