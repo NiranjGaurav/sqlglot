@@ -417,8 +417,34 @@ def monitor_session_progress(
         # Get session metadata
         session_metadata = get_session_metadata_from_redis(session_id)
 
-        # Get staging statistics
-        staging_stats = get_staging_statistics(session_id)
+        # Check if session is already completed first (to avoid unnecessary staging checks)
+        r = get_redis_connection()
+        session_meta_key = f"session_meta_{session_id}"
+        session_complete = False
+        
+        # Quick check if session has committer result indicating completion
+        if r.exists(session_meta_key):
+            iceberg_commit_key = f"iceberg_commit_{session_id}"
+            if r.exists(iceberg_commit_key):
+                try:
+                    commit_data = r.hgetall(iceberg_commit_key)
+                    if commit_data.get(b"success") == b"True":
+                        session_complete = True
+                        logger.debug(f"✅ Session {session_id} already completed, skipping staging checks")
+                except Exception:
+                    pass
+        
+        # Get staging statistics only if session is not completed
+        if session_complete:
+            staging_stats = {
+                "session_id": session_id,
+                "total_files": 0,
+                "staging_complete": True,
+                "manifest_exists": True,
+                "session_completed": True
+            }
+        else:
+            staging_stats = get_staging_statistics(session_id)
 
         # Check worker group status (only if Celery is available and we have group_id)
         workers_status = {"status": "unknown"}

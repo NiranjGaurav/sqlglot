@@ -66,12 +66,12 @@ USER worker
 
 # Health check - verify Celery can connect to Redis
 HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
-    CMD celery -A worker.celery inspect ping || exit 1
+    CMD celery -A automated_processing.worker.celery inspect ping || exit 1
 
 # Use the start_worker.sh script but modify for container environment
 # In container, we don't need to start Redis (it's a separate service)
 # So we use the Celery command directly from the script
-CMD ["celery", "-A", "worker.celery", "worker", \
+CMD ["celery", "-A", "automated_processing.worker.celery", "worker", \
      "--loglevel=info", \
      "--pool=prefork", \
      "--autoscale=4,1", \

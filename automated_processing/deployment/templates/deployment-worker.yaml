@@ -24,7 +24,7 @@ spec:
           command:
             - celery
             - -A
-            - worker.celery
+            - automated_processing.worker.celery
             - worker
             - --loglevel=info
             - --pool=prefork
@@ -70,7 +70,7 @@ spec:
           command:
             - celery
             - -A
-            - worker.celery
+            - automated_processing.worker.celery
             - worker
             - --loglevel=info
             - --pool=solo
