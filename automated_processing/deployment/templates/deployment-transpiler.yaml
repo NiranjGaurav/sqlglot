@@ -33,4 +33,13 @@ spec:
             - secretRef:
                 name: aws-credentials
             {{- end }}
+          resources:
+            requests:
+              memory: "{{ .Values.automatedApi.resources.requests.memory }}"
+              cpu: "{{ .Values.automatedApi.resources.requests.cpu }}"
+              ephemeral-storage: "{{ index .Values.automatedApi.resources.requests "ephemeral-storage" }}"
+            limits:
+              memory: "{{ .Values.automatedApi.resources.limits.memory }}"
+              cpu: "{{ .Values.automatedApi.resources.limits.cpu }}"
+              ephemeral-storage: "{{ index .Values.automatedApi.resources.limits "ephemeral-storage" }}"
       restartPolicy: Always

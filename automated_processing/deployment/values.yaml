@@ -17,13 +17,13 @@ automatedApi:
     AWS_DEFAULT_REGION : "us-east-1"
   resources:
     requests:
-      memory: "2Gi"       # Increased for orchestration of large jobs
-      cpu: "1"            # Guaranteed 1 CPU core for API/orchestration
-      ephemeral-storage: "1Gi"
-    limits:
-      memory: "4Gi"       # Can handle larger orchestration tasks
-      cpu: "2"            # Can burst up to 2 CPU cores
+      memory: "4Gi"       # Increased for large file processing
+      cpu: "2"            # Guaranteed 2 CPU cores for API/orchestration
       ephemeral-storage: "2Gi"
+    limits:
+      memory: "8Gi"       # Can handle large file processing (1.7GB+ files)
+      cpu: "4"            # Can burst up to 4 CPU cores
+      ephemeral-storage: "4Gi"
 
 frontend:
   image: 670514002493.dkr.ecr.us-east-1.amazonaws.com/batch-transpiler-frontend
@@ -93,10 +93,10 @@ redis:
     storageClass: "gp2"  # Use gp2 (more commonly available than gp3)
   resources:
     requests:
-      memory: "256Mi"
+      memory: "2Gi"
       cpu: "100m"
     limits:
-      memory: "2Gi"
+      memory: "6Gi"
       cpu: "200m"
 
 # This is for the secrets for pulling an image from a private repository more information can be found here: https://kubernetes.io/docs/tasks/configure-pod-container/pull-image-private-registry/

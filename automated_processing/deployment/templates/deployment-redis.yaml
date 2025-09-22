@@ -21,7 +21,7 @@ spec:
           ports:
             - containerPort: {{ .Values.redis.servicePorts.port }}
           resources:
-            {{- toYaml .Values.redis.resources | nindent 12 }}
+            {{ toYaml .Values.redis.resources | nindent 12 }}
           {{- if .Values.redis.persistence.enabled }}
           volumeMounts:
             - name: redis-data
