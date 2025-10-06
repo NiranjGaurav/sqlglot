@@ -1,0 +1,40 @@
+# Upstream Sync Configuration
+
+upstream:
+  repository: "tobymao/sqlglot"
+  branch: "main"
+
+company:
+  repository: "e6data/sqlglot"
+  branch: "main"
+
+personal:
+  repository: "NiranjGaurav/sqlglot"
+  branch: "main"
+
+sync:
+  schedule: "29 18 * * 0"  # Sunday 11:59 PM IST
+  branch_pattern: "rebase-{date}"
+  target_branch: "main"
+
+validation:
+  run_tests: true
+  create_pr_on_test_failure: false
+  timeout_minutes: 30
+
+notifications:
+  create_issues: true
+  assignees:
+    - "@me"
+  labels:
+    pr:
+      - "upstream-sync"
+      - "automated"
+    conflict_issue:
+      - "upstream-sync"
+      - "merge-conflict"
+      - "needs-attention"
+    test_failure_issue:
+      - "upstream-sync"
+      - "test-failure"
+      - "needs-attention"

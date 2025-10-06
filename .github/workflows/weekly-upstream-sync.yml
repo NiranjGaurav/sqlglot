@@ -1,0 +1,297 @@
+name: Weekly Upstream Sync
+
+on:
+  # Schedule to run every Sunday at 11:59 PM IST
+  schedule:
+    - cron: '29 18 * * 0'  # 11:59 PM IST = 6:29 PM UTC (IST is UTC+5:30)
+
+  # Allow manual trigger for testing
+  workflow_dispatch:
+    inputs:
+      skip_tests:
+        description: 'Skip make check (for testing only)'
+        required: false
+        default: false
+        type: boolean
+      target_branch:
+        description: 'Target branch to sync (default: main)'
+        required: false
+        default: 'main'
+        type: string
+
+jobs:
+  upstream-sync:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    steps:
+      - name: Generate branch name
+        id: branch
+        run: |
+          DATE=$(date +%Y-%m-%d)
+          BRANCH_NAME="rebase-${DATE}"
+          echo "name=${BRANCH_NAME}" >> $GITHUB_OUTPUT
+          echo "date=${DATE}" >> $GITHUB_OUTPUT
+
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # Fetch all history for proper rebase
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Configure git
+        run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Add upstream remote
+        run: |
+          # Add the original tobymao/sqlglot as upstream
+          git remote add toby https://github.com/tobymao/sqlglot.git || true
+          # Ensure e6data fork is set as origin
+          git remote add e6 https://github.com/e6data/sqlglot.git || true
+          git remote -v
+
+      - name: Fetch latest changes
+        run: |
+          git fetch origin
+          git fetch toby
+
+      - name: Create rebase branch
+        id: create_branch
+        run: |
+          # Start from origin/main (your fork's main)
+          git checkout -b ${{ steps.branch.outputs.name }} origin/main
+          echo "Branch ${{ steps.branch.outputs.name }} created"
+
+      - name: Attempt rebase with upstream
+        id: rebase
+        continue-on-error: true
+        run: |
+          # Try to merge toby/main (original upstream)
+          TARGET_BRANCH="${{ github.event.inputs.target_branch || 'main' }}"
+          echo "Attempting to merge toby/${TARGET_BRANCH}..."
+
+          if git merge toby/${TARGET_BRANCH} --no-edit; then
+            echo "rebase_success=true" >> $GITHUB_OUTPUT
+            echo "✅ Merge successful!"
+          else
+            echo "rebase_success=false" >> $GITHUB_OUTPUT
+            echo "❌ Merge conflicts detected!"
+
+            # Capture conflict information
+            echo "## Conflicted Files" > conflict_report.md
+            git diff --name-only --diff-filter=U >> conflict_report.md
+            echo "" >> conflict_report.md
+
+            echo "## Conflict Details" >> conflict_report.md
+            git status --short | grep "^UU" >> conflict_report.md || true
+
+            # Abort the merge
+            git merge --abort
+            exit 1
+          fi
+
+      - name: Set up Python
+        if: steps.rebase.outputs.rebase_success == 'true'
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        if: steps.rebase.outputs.rebase_success == 'true'
+        run: |
+          python -m pip install --upgrade pip
+          make install-dev
+
+      - name: Run make check
+        id: tests
+        if: steps.rebase.outputs.rebase_success == 'true' && github.event.inputs.skip_tests != 'true'
+        continue-on-error: true
+        run: |
+          if make check; then
+            echo "tests_passed=true" >> $GITHUB_OUTPUT
+            echo "✅ All tests passed!"
+          else
+            echo "tests_passed=false" >> $GITHUB_OUTPUT
+            echo "❌ Tests failed!"
+            exit 1
+          fi
+
+      - name: Push rebase branch
+        if: steps.rebase.outputs.rebase_success == 'true'
+        run: |
+          git push origin ${{ steps.branch.outputs.name }} --force-with-lease
+
+      - name: Create Pull Request
+        if: steps.rebase.outputs.rebase_success == 'true' && (steps.tests.outputs.tests_passed == 'true' || github.event.inputs.skip_tests == 'true')
+        uses: peter-evans/create-pull-request@v5
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          branch: ${{ steps.branch.outputs.name }}
+          base: main
+          title: "[Automated] Weekly upstream sync - ${{ steps.branch.outputs.date }}"
+          body: |
+            ## 🔄 Automated Weekly Upstream Sync
+
+            This PR syncs our fork with the latest changes from upstream repository.
+
+            **Branch**: `${{ steps.branch.outputs.name }}`
+            **Date**: ${{ steps.branch.outputs.date }}
+            **Status**: ✅ All checks passed
+
+            ### Validation Results:
+            - ✅ Rebase successful
+            - ${{ steps.tests.outputs.tests_passed == 'true' && '✅ All tests passed' || '⏭️ Tests skipped' }}
+
+            ### Next Steps:
+            1. Review the changes
+            2. Ensure no breaking changes for our custom code
+            3. Merge when ready
+
+            ---
+            *This PR was automatically created by the weekly sync workflow.*
+          labels: |
+            upstream-sync
+            automated
+          assignees: ${{ github.actor }}
+          draft: false
+
+      - name: Create Issue for Conflicts
+        if: steps.rebase.outputs.rebase_success == 'false'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const conflictReport = fs.existsSync('conflict_report.md')
+              ? fs.readFileSync('conflict_report.md', 'utf8')
+              : 'No detailed conflict report available.';
+
+            const issue = await github.rest.issues.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              title: `[Upstream Sync] Merge conflicts detected - ${new Date().toISOString().split('T')[0]}`,
+              body: `## ⚠️ Weekly Upstream Sync Failed - Manual Resolution Required
+
+              The automated upstream sync encountered merge conflicts that need manual resolution.
+
+              **Date**: ${new Date().toISOString().split('T')[0]}
+              **Branch**: \`${{ steps.branch.outputs.name }}\`
+
+              ### Conflict Information:
+              ${conflictReport}
+
+              ### How to Resolve:
+
+              1. **Checkout the branch locally:**
+                 \`\`\`bash
+                 git fetch origin
+                 git checkout -b ${{ steps.branch.outputs.name }} origin/main
+                 \`\`\`
+
+              2. **Add upstream and attempt merge:**
+                 \`\`\`bash
+                 git remote add upstream https://github.com/tobymao/sqlglot.git
+                 git fetch upstream
+                 git merge upstream/main
+                 \`\`\`
+
+              3. **Resolve conflicts manually**
+
+              4. **Run tests:**
+                 \`\`\`bash
+                 make check
+                 \`\`\`
+
+              5. **Push and create PR:**
+                 \`\`\`bash
+                 git push origin ${{ steps.branch.outputs.name }}
+                 # Then create PR on GitHub
+                 \`\`\`
+
+              ---
+              *This issue was automatically created by the weekly sync workflow.*`,
+              labels: ['upstream-sync', 'merge-conflict', 'needs-attention']
+            });
+
+            console.log(`Issue created: ${issue.data.html_url}`);
+
+      - name: Create Issue for Test Failures
+        if: steps.rebase.outputs.rebase_success == 'true' && steps.tests.outputs.tests_passed == 'false'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const issue = await github.rest.issues.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              title: `[Upstream Sync] Tests failing after rebase - ${new Date().toISOString().split('T')[0]}`,
+              body: `## ⚠️ Weekly Upstream Sync - Tests Failed
+
+              The upstream sync was successful but tests are failing after the merge.
+
+              **Date**: ${new Date().toISOString().split('T')[0]}
+              **Branch**: \`${{ steps.branch.outputs.name }}\` (already pushed)
+
+              ### Status:
+              - ✅ Rebase successful
+              - ❌ Tests failed (make check)
+
+              ### How to Fix:
+
+              1. **Checkout the branch:**
+                 \`\`\`bash
+                 git fetch origin
+                 git checkout ${{ steps.branch.outputs.name }}
+                 \`\`\`
+
+              2. **Run tests locally to see failures:**
+                 \`\`\`bash
+                 make check
+                 \`\`\`
+
+              3. **Fix the failing tests**
+
+              4. **Push fixes:**
+                 \`\`\`bash
+                 git push origin ${{ steps.branch.outputs.name }}
+                 \`\`\`
+
+              5. **Create PR when tests pass**
+
+              ### View Test Results:
+              [Click here to view the workflow run](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})
+
+              ---
+              *This issue was automatically created by the weekly sync workflow.*`,
+              labels: ['upstream-sync', 'test-failure', 'needs-attention']
+            });
+
+            console.log(`Issue created: ${issue.data.html_url}`);
+
+      - name: Summary
+        if: always()
+        run: |
+          echo "## 📊 Workflow Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+
+          if [[ "${{ steps.rebase.outputs.rebase_success }}" == "true" ]]; then
+            echo "✅ **Rebase Status**: Successful" >> $GITHUB_STEP_SUMMARY
+
+            if [[ "${{ steps.tests.outputs.tests_passed }}" == "true" ]]; then
+              echo "✅ **Tests Status**: Passed" >> $GITHUB_STEP_SUMMARY
+              echo "✅ **PR Status**: Created automatically" >> $GITHUB_STEP_SUMMARY
+            elif [[ "${{ github.event.inputs.skip_tests }}" == "true" ]]; then
+              echo "⏭️ **Tests Status**: Skipped" >> $GITHUB_STEP_SUMMARY
+              echo "✅ **PR Status**: Created automatically" >> $GITHUB_STEP_SUMMARY
+            else
+              echo "❌ **Tests Status**: Failed" >> $GITHUB_STEP_SUMMARY
+              echo "📝 **Issue Status**: Created for test failures" >> $GITHUB_STEP_SUMMARY
+            fi
+          else
+            echo "❌ **Rebase Status**: Failed (conflicts)" >> $GITHUB_STEP_SUMMARY
+            echo "📝 **Issue Status**: Created for conflict resolution" >> $GITHUB_STEP_SUMMARY
+          fi
+
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Branch**: \`${{ steps.branch.outputs.name }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "**Date**: ${{ steps.branch.outputs.date }}" >> $GITHUB_STEP_SUMMARY
