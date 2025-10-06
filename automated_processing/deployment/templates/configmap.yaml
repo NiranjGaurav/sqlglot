@@ -1,0 +1,36 @@
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: app-config
+  namespace: {{ .Values.namespace | default "transpiler-prod" }}
+  labels:
+    {{- include "deployment.labels" . | nindent 4 }}
+data:
+  # Celery Configuration
+  CELERY_BROKER_URL: "redis://redis:6379/0"
+  CELERY_RESULT_BACKEND: "redis://redis:6379/0"
+  
+  # Python Configuration
+  PYTHONUNBUFFERED: "1"
+  PYTHONPATH: "/app:/app/automated_processing"
+  
+  # PyArrow Configuration (prevent segfaults)
+  ARROW_ENABLE_NULL_CHECK_FOR_GET: "0"
+  ARROW_ENABLE_TIMING_TESTS: "0"
+  OMP_NUM_THREADS: "1"
+  
+  # AWS Configuration (EKS optimized)
+  AWS_REGION: "{{ .Values.aws.region | default "us-east-1" }}"
+  AWS_DEFAULT_REGION: "{{ .Values.aws.region | default "us-east-1" }}"
+  S3_BUCKET: "{{ .Values.aws.s3Bucket | default "batch-transpiler" }}"
+  S3_STAGING_PREFIX: "staging"
+  ICEBERG_CATALOG_NAME: "{{ .Values.aws.icebergCatalog | default "glue_catalog" }}"
+  
+  # Application Configuration
+  ENABLE_GUARDRAIL: "False"
+  STORAGE_ENGINE_URL: "localhost"
+  STORAGE_ENGINE_PORT: "9005"
+  
+  # Uvicorn Configuration (EKS scaling)
+  UVICORN_WORKERS: "{{ .Values.application.uvicornWorkers | default "4" }}"

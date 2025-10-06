@@ -1,0 +1,47 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: automated-api
+  namespace: transpiler-prod
+  labels:
+    app: automated-api
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: automated-api
+  template:
+    metadata:
+      labels:
+        app: automated-api
+    spec:
+      serviceAccountName: {{ .Values.serviceAccount.name }}
+      containers:
+        - name: automated-api
+          image: {{ printf "%s:%s" .Values.automatedApi.image .Values.automatedApi.tag }}
+          imagePullPolicy: {{ .Values.automatedApi.imagePullPolicy }}
+          ports:
+            - containerPort: {{ .Values.automatedApi.service.servicePorts.targetPort }}
+          env:
+            {{- range $k, $v := .Values.automatedApi.env}}
+            - name: {{ $k }}
+              value: "{{ $v }}"
+            {{end}}
+          envFrom:
+            - configMapRef:
+                name: app-config
+            {{- if .Values.aws.useSecrets }}
+            - secretRef:
+                name: aws-credentials
+            {{- end }}
+          resources:
+            requests:
+              memory: "{{ .Values.automatedApi.resources.requests.memory }}"
+              cpu: "{{ .Values.automatedApi.resources.requests.cpu }}"
+              ephemeral-storage: "{{ index .Values.automatedApi.resources.requests "ephemeral-storage" }}"
+            limits:
+              memory: "{{ .Values.automatedApi.resources.limits.memory }}"
+              cpu: "{{ .Values.automatedApi.resources.limits.cpu }}"
+              ephemeral-storage: "{{ index .Values.automatedApi.resources.limits "ephemeral-storage" }}"
+      restartPolicy: Always
+      tolerations: {{ toYaml .Values.commonTolerations | nindent 8 }}

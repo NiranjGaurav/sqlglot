@@ -1,0 +1,112 @@
+namespace: transpiler-prod
+
+automatedApi:
+  image: 670514002493.dkr.ecr.us-east-1.amazonaws.com/batch-transpiler
+  tag: latest
+  replicaCount: 1
+  imagePullPolicy: Always
+  service:
+    type: LoadBalancer
+    servicePorts:
+      port: 8101
+      targetPort: 8101
+  env:
+    CELERY_BROKER_URL : "redis://redis:6379/0"
+    CELERY_RESULT_BACKEND : "redis://redis:6379/0"
+    PYTHONUNBUFFERED : "1"
+    AWS_DEFAULT_REGION : "us-east-1"
+  resources:
+    requests:
+      memory: "2Gi"       # Increased for large file processing
+      cpu: "2"            # Guaranteed 2 CPU cores for API/orchestration
+      ephemeral-storage: "1Gi"
+    limits:
+      memory: "4Gi"       # Can handle large file processing (1.7GB+ files)
+      cpu: "4"            # Can burst up to 4 CPU cores
+      ephemeral-storage: "2Gi"
+
+frontend:
+  image: 670514002493.dkr.ecr.us-east-1.amazonaws.com/batch-transpiler-frontend
+  tag: latest
+  replicaCount: 1
+  service:
+    type: LoadBalancer
+    servicePorts:
+      port: 3000
+      targetPort: 3000
+  env:
+    NODE_ENV : "production"
+    API_URL: "http://automated-api:8101"
+  resources:
+    requests:
+      memory: "256Mi"
+      cpu: "100m"
+    limits:
+      memory: "512Mi"
+      cpu: "250m"
+
+worker:
+  image: 670514002493.dkr.ecr.us-east-1.amazonaws.com/transpiler-celery-worker
+  tag: latest
+  replicaCount: 4  # Scale to 5 replicas for high-volume processing
+  imagePullPolicy: Always
+  env:
+    CELERY_BROKER_URL : "redis://redis:6379/0"
+    CELERY_RESULT_BACKEND : "redis://redis:6379/0"
+    PYTHONUNBUFFERED: "1"
+    OMP_NUM_THREADS : "1"
+    ARROW_ENABLE_NULL_CHECK_FOR_GET : "0"
+    ARROW_ENABLE_TIMING_TESTS : "0"
+    AWS_DEFAULT_REGION : "us-east-1"
+  resources:
+    requests:
+      memory: "4Gi"   # Guaranteed resources for large query processing
+      cpu: "2"        # Guaranteed 2 CPU cores per worker
+    limits:
+      memory: "8Gi"   # Can use up to 8GB if available
+      cpu: "4"        # Can burst up to 4 CPU cores
+
+# AWS Configuration for EKS
+aws:
+  region: "us-east-1"
+  s3Bucket: "batch-transpiler"
+  icebergCatalog: "glue_catalog"
+  useSecrets: false
+
+# Application Configuration
+application:
+  enableGuardrail: "False"
+  storageEngineUrl: "localhost"
+  storageEnginePort: "9005"
+  uvicornWorkers: "4"
+
+# Redis Service
+redis:
+  image: redis:7-alpine
+  replicaCount: 1
+  servicePorts:
+    port: 6379
+    targetPort: 6379
+  persistence:
+    enabled: true  # Set to true for production
+    size: 8Gi
+    storageClass: "gp2"  # Use gp2 (more commonly available than gp3)
+  resources:
+    requests:
+      memory: "2Gi"
+      cpu: "100m"
+    limits:
+      memory: "6Gi"
+      cpu: "200m"
+
+
+
+# This section builds out the service account more information can be found here: https://kubernetes.io/docs/concepts/security/service-accounts/
+serviceAccount:
+  name: pipeline-release-prod-schema-access-sa
+  roleArn: arn:aws:iam::670514002493:role/s3_access_transpiler
+
+commonTolerations:
+  - key: e6data-workspace-name
+    effect: NoSchedule
+    value: streaming-ingest

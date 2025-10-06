@@ -1,0 +1,98 @@
+---
+# Processing Workers Deployment (can scale horizontally)
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: celery-workers
+  namespace: transpiler-prod
+  labels:
+    app: celery-worker
+spec:
+  replicas: {{ .Values.worker.replicaCount }}
+  selector:
+    matchLabels:
+      app: celery-worker
+  template:
+    metadata:
+      labels:
+        app: celery-worker
+    spec:
+      tolerations: {{ toYaml .Values.commonTolerations | nindent 8 }}
+      serviceAccountName: {{ .Values.serviceAccount.name }}
+      containers:
+        - name: celery-worker
+          image: {{ printf "%s:%s" .Values.worker.image .Values.worker.tag }}
+          imagePullPolicy: Always
+          command:
+            - celery
+            - -A
+            - automated_processing.worker.celery
+            - worker
+            - --loglevel=info
+            - --pool=prefork
+            - --autoscale=4,1
+            - -Q
+            - processing_queue
+          env:
+            {{- range $k, $v := .Values.worker.env }}
+            - name: {{ $k }}
+              value: "{{ $v }}"
+            {{ end }}
+          envFrom:
+            - configMapRef:
+                name: app-config
+            {{- if .Values.aws.useSecrets }}
+            - secretRef:
+                name: aws-credentials
+            {{- end }}
+
+
+---
+
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: iceberg-committer
+  namespace: transpiler-prod
+  labels:
+    app: iceberg-committer
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: iceberg-committer
+  template:
+    metadata:
+      labels:
+        app: iceberg-committer
+    spec:
+      tolerations: {{ toYaml .Values.commonTolerations | nindent 8 }}
+      serviceAccountName: {{ .Values.serviceAccount.name }}
+      containers:
+        - name: iceberg-committer
+          image: {{ printf "%s:%s" .Values.worker.image .Values.worker.tag }}
+          imagePullPolicy: Always
+          command:
+            - celery
+            - -A
+            - automated_processing.worker.celery
+            - worker
+            - --loglevel=info
+            - --pool=solo
+            - --concurrency=1
+            - -Q
+            - iceberg_commit
+          env:
+            {{- range $k, $v := .Values.worker.env }}
+            - name: {{ $k }}
+              value: "{{ $v }}"
+            {{- end }}
+          envFrom:
+            - configMapRef:
+                name: app-config
+            {{- if .Values.aws.useSecrets }}
+            - secretRef:
+                name: aws-credentials
+            {{- end }}
+      restartPolicy: Always
+

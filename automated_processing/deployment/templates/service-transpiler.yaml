@@ -1,0 +1,17 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: automated-api
+  namespace: transpiler-prod
+  labels:
+    app: automated-api
+  annotations:
+    service.beta.kubernetes.io/aws-load-balancer-scheme: "internet-facing"
+    service.beta.kubernetes.io/aws-load-balancer-type: "nlb"
+spec:
+  selector:
+    app: automated-api
+  ports:
+    - port: {{ .Values.automatedApi.service.servicePorts.port }}
+      targetPort: {{ .Values.automatedApi.service.servicePorts.targetPort }}
+  type: {{ .Values.automatedApi.service.type }}

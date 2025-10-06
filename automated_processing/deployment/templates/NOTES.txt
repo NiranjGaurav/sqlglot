@@ -1,0 +1,35 @@
+1. Get the application URLs by running these commands:
+
+## Frontend Service:
+{{- if contains "LoadBalancer" .Values.frontend.service.type }}
+  NOTE: It may take a few minutes for the LoadBalancer IP to be available.
+        You can watch its status by running 'kubectl get --namespace {{ .Values.namespace }} svc -w frontend-service'
+
+  export FRONTEND_IP=$(kubectl get svc --namespace {{ .Values.namespace }} frontend-service --template "{{ "{{" }} range (index .status.loadBalancer.ingress 0) {{ "}}" }}{{ "{{" }}.{{ "}}" }}{{ "{{" }} end {{ "}}" }}")
+  echo Frontend URL: http://$FRONTEND_IP:{{ .Values.frontend.service.servicePorts.port }}
+{{- else if contains "NodePort" .Values.frontend.service.type }}
+  export NODE_PORT=$(kubectl get --namespace {{ .Values.namespace }} -o jsonpath="{.spec.ports[0].nodePort}" services frontend-service)
+  export NODE_IP=$(kubectl get nodes --namespace {{ .Values.namespace }} -o jsonpath="{.items[0].status.addresses[0].address}")
+  echo Frontend URL: http://$NODE_IP:$NODE_PORT
+{{- else if contains "ClusterIP" .Values.frontend.service.type }}
+  export POD_NAME=$(kubectl get pods --namespace {{ .Values.namespace }} -l "app=frontend" -o jsonpath="{.items[0].metadata.name}")
+  echo "Frontend URL: http://127.0.0.1:3000"
+  kubectl --namespace {{ .Values.namespace }} port-forward $POD_NAME 3000:{{ .Values.frontend.service.servicePorts.targetPort }}
+{{- end }}
+
+## API Service:
+{{- if contains "LoadBalancer" .Values.automatedApi.service.type }}
+  NOTE: It may take a few minutes for the LoadBalancer IP to be available.
+        You can watch its status by running 'kubectl get --namespace {{ .Values.namespace }} svc -w automated-api'
+
+  export API_IP=$(kubectl get svc --namespace {{ .Values.namespace }} automated-api --template "{{ "{{" }} range (index .status.loadBalancer.ingress 0) {{ "}}" }}{{ "{{" }}.{{ "}}" }}{{ "{{" }} end {{ "}}" }}")
+  echo API URL: http://$API_IP:{{ .Values.automatedApi.service.servicePorts.port }}
+{{- else if contains "NodePort" .Values.automatedApi.service.type }}
+  export NODE_PORT=$(kubectl get --namespace {{ .Values.namespace }} -o jsonpath="{.spec.ports[0].nodePort}" services automated-api)
+  export NODE_IP=$(kubectl get nodes --namespace {{ .Values.namespace }} -o jsonpath="{.items[0].status.addresses[0].address}")
+  echo API URL: http://$NODE_IP:$NODE_PORT
+{{- else if contains "ClusterIP" .Values.automatedApi.service.type }}
+  export POD_NAME=$(kubectl get pods --namespace {{ .Values.namespace }} -l "app=automated-api" -o jsonpath="{.items[0].metadata.name}")
+  echo "API URL: http://127.0.0.1:8101"
+  kubectl --namespace {{ .Values.namespace }} port-forward $POD_NAME 8101:{{ .Values.automatedApi.service.servicePorts.targetPort }}
+{{- end }}
