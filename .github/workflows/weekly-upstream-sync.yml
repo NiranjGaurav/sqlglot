@@ -166,7 +166,9 @@ jobs:
           labels: |
             upstream-sync
             automated
-          assignees: ${{ github.actor }}
+          assignees: |
+            NiranjGaurav
+            tkaunlaky-e6
           draft: false
 
       - name: Create Issue for Conflicts
@@ -223,7 +225,8 @@ jobs:
 
               ---
               *This issue was automatically created by the weekly sync workflow.*`,
-              labels: ['upstream-sync', 'merge-conflict', 'needs-attention']
+              labels: ['upstream-sync', 'merge-conflict', 'needs-attention'],
+              assignees: ['NiranjGaurav','tkaunlaky-e6']
             });
 
             console.log(`Issue created: ${issue.data.html_url}`);
@@ -275,7 +278,8 @@ jobs:
 
               ---
               *This issue was automatically created by the weekly sync workflow.*`,
-              labels: ['upstream-sync', 'test-failure', 'needs-attention']
+              labels: ['upstream-sync', 'test-failure', 'needs-attention'],
+              assignees: ['NiranjGaurav','tkaunlaky-e6']
             });
 
             console.log(`Issue created: ${issue.data.html_url}`);
