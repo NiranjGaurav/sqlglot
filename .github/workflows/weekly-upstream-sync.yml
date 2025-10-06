@@ -289,10 +289,50 @@ jobs:
             else
               echo "❌ **Tests Status**: Failed" >> $GITHUB_STEP_SUMMARY
               echo "📝 **Issue Status**: Created for test failures" >> $GITHUB_STEP_SUMMARY
+              echo "" >> $GITHUB_STEP_SUMMARY
+              echo "### 🔧 Commands to Fix:" >> $GITHUB_STEP_SUMMARY
+              echo "\`\`\`bash" >> $GITHUB_STEP_SUMMARY
+              echo "# Checkout the branch" >> $GITHUB_STEP_SUMMARY
+              echo "git fetch myfork" >> $GITHUB_STEP_SUMMARY
+              echo "git checkout ${{ steps.branch.outputs.name }}" >> $GITHUB_STEP_SUMMARY
+              echo "" >> $GITHUB_STEP_SUMMARY
+              echo "# Run tests to see failures" >> $GITHUB_STEP_SUMMARY
+              echo "make check" >> $GITHUB_STEP_SUMMARY
+              echo "" >> $GITHUB_STEP_SUMMARY
+              echo "# After fixing, push changes" >> $GITHUB_STEP_SUMMARY
+              echo "git add ." >> $GITHUB_STEP_SUMMARY
+              echo "git commit -m 'Fix test failures'" >> $GITHUB_STEP_SUMMARY
+              echo "git push myfork ${{ steps.branch.outputs.name }}" >> $GITHUB_STEP_SUMMARY
+              echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
             fi
           else
             echo "❌ **Rebase Status**: Failed (conflicts)" >> $GITHUB_STEP_SUMMARY
             echo "📝 **Issue Status**: Created for conflict resolution" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "### 🔧 Commands to Resolve Conflicts:" >> $GITHUB_STEP_SUMMARY
+            echo "\`\`\`bash" >> $GITHUB_STEP_SUMMARY
+            echo "# Checkout the branch" >> $GITHUB_STEP_SUMMARY
+            echo "git fetch myfork" >> $GITHUB_STEP_SUMMARY
+            echo "git checkout ${{ steps.branch.outputs.name }}" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "# Attempt merge to see conflicts" >> $GITHUB_STEP_SUMMARY
+            echo "git remote add toby https://github.com/tobymao/sqlglot.git || true" >> $GITHUB_STEP_SUMMARY
+            echo "git fetch toby" >> $GITHUB_STEP_SUMMARY
+            echo "git merge toby/main" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "# After resolving conflicts" >> $GITHUB_STEP_SUMMARY
+            echo "git add ." >> $GITHUB_STEP_SUMMARY
+            echo "git commit -m 'Resolve merge conflicts'" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "# Run tests" >> $GITHUB_STEP_SUMMARY
+            echo "make check" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "# Push changes" >> $GITHUB_STEP_SUMMARY
+            echo "git push myfork ${{ steps.branch.outputs.name }}" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "# Create PR to e6data/sqlglot" >> $GITHUB_STEP_SUMMARY
+            echo "# Go to: https://github.com/NiranjGaurav/sqlglot/pull/new/${{ steps.branch.outputs.name }}" >> $GITHUB_STEP_SUMMARY
+            echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
           fi
 
           echo "" >> $GITHUB_STEP_SUMMARY
