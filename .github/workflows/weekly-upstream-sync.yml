@@ -87,9 +87,9 @@ jobs:
             echo "## Conflict Details" >> conflict_report.md
             git status --short | grep "^UU" >> conflict_report.md || true
 
-            # Abort the merge
-            git merge --abort
-            exit 1
+            # Don't abort - keep the branch with conflict markers
+            # This allows the branch to be pushed for manual resolution
+            echo "Branch will be pushed with conflict markers for manual resolution"
           fi
 
       - name: Set up Python
@@ -119,9 +119,12 @@ jobs:
           fi
 
       - name: Push rebase branch
-        if: steps.rebase.outputs.rebase_success == 'true'
+        if: always()
+        continue-on-error: true
         run: |
-          git push origin ${{ steps.branch.outputs.name }} --force-with-lease
+          # Always push the branch, even if there are conflicts
+          # This allows manual resolution directly on the branch
+          git push origin ${{ steps.branch.outputs.name }} --force-with-lease || git push origin ${{ steps.branch.outputs.name }}
 
       - name: Create Pull Request
         if: steps.rebase.outputs.rebase_success == 'true' && (steps.tests.outputs.tests_passed == 'true' || github.event.inputs.skip_tests == 'true')
@@ -176,7 +179,7 @@ jobs:
               The automated upstream sync encountered merge conflicts that need manual resolution.
 
               **Date**: ${new Date().toISOString().split('T')[0]}
-              **Branch**: \`${{ steps.branch.outputs.name }}\`
+              **Branch**: \`${{ steps.branch.outputs.name }}\` (pushed to your fork with conflicts)
 
               ### Conflict Information:
               ${conflictReport}
