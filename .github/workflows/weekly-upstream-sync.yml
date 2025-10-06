@@ -121,13 +121,22 @@ jobs:
         if: steps.rebase.outputs.rebase_success == 'true'
         run: |
           python -m pip install --upgrade pip
-          make install-dev
+          # Create virtual environment for maturin
+          python -m venv .venv
+          source .venv/bin/activate
+          # Install without Rust tokenizer to avoid maturin issues
+          make install-dev-core || make install
 
       - name: Run make check
         id: tests
         if: steps.rebase.outputs.rebase_success == 'true' && github.event.inputs.skip_tests != 'true'
         continue-on-error: true
         run: |
+          # Activate virtual environment if it exists
+          if [ -d ".venv" ]; then
+            source .venv/bin/activate
+          fi
+
           if make check; then
             echo "tests_passed=true" >> $GITHUB_OUTPUT
             echo "✅ All tests passed!"
