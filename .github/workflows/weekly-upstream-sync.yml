@@ -18,11 +18,6 @@ on:
         required: false
         default: 'main'
         type: string
-      test_mode:
-        description: 'Test mode - merge only safe commits'
-        required: false
-        default: false
-        type: boolean
 
 jobs:
   upstream-sync:
@@ -77,21 +72,7 @@ jobs:
           TARGET_BRANCH="${{ github.event.inputs.target_branch || 'main' }}"
           echo "Attempting to merge toby/${TARGET_BRANCH}..."
 
-          # Determine what to merge based on test mode
-          if [[ "${{ github.event.inputs.test_mode }}" == "true" ]]; then
-            echo "📋 Test mode: merging from test-upstream branch in your fork"
-            # For testing: merge from a test branch in your own fork
-            # Note: In GitHub Actions, 'origin' refers to the repo being acted upon (your fork)
-            MERGE_TARGET="origin/test-upstream"
-            echo "Test mode - merging from: ${MERGE_TARGET}"
-          else
-            # Normal mode: merge from actual upstream
-            MERGE_TARGET="toby/${TARGET_BRANCH}"
-            echo "Production mode - merging from: ${MERGE_TARGET}"
-          fi
-
-          echo "Attempting to merge: ${MERGE_TARGET}"
-          if git merge ${MERGE_TARGET} --no-edit; then
+          if git merge toby/${TARGET_BRANCH} --no-edit; then
             echo "rebase_success=true" >> $GITHUB_OUTPUT
             echo "✅ Merge successful!"
           else
