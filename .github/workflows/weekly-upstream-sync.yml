@@ -79,31 +79,38 @@ jobs:
 
           # Determine what to merge based on test mode
           if [[ "${{ github.event.inputs.test_mode }}" == "true" ]]; then
-            echo "📋 Test mode: merging only safe commits"
-            MERGE_TARGET="4d609fb91"  # docs: update API docs commit (safe)
+            echo "📋 Test mode: cherry-picking only one safe commit"
+            # Cherry-pick just one commit instead of merging
+            TEST_COMMIT="4d609fb91"  # docs: update API docs commit
+            if git cherry-pick ${TEST_COMMIT} --no-edit; then
+              echo "rebase_success=true" >> $GITHUB_OUTPUT
+              echo "✅ Cherry-pick successful!"
+            else
+              echo "rebase_success=false" >> $GITHUB_OUTPUT
+              echo "❌ Cherry-pick failed!"
+            fi
           else
-            MERGE_TARGET="toby/${TARGET_BRANCH}"
-          fi
+            # Normal mode: merge all changes
+            echo "Merging: toby/${TARGET_BRANCH}"
+            if git merge toby/${TARGET_BRANCH} --no-edit; then
+              echo "rebase_success=true" >> $GITHUB_OUTPUT
+              echo "✅ Merge successful!"
+            else
+              echo "rebase_success=false" >> $GITHUB_OUTPUT
+              echo "❌ Merge conflicts detected!"
 
-          echo "Merging: ${MERGE_TARGET}"
-          if git merge ${MERGE_TARGET} --no-edit; then
-            echo "rebase_success=true" >> $GITHUB_OUTPUT
-            echo "✅ Merge successful!"
-          else
-            echo "rebase_success=false" >> $GITHUB_OUTPUT
-            echo "❌ Merge conflicts detected!"
+              # Capture conflict information
+              echo "## Conflicted Files" > conflict_report.md
+              git diff --name-only --diff-filter=U >> conflict_report.md
+              echo "" >> conflict_report.md
 
-            # Capture conflict information
-            echo "## Conflicted Files" > conflict_report.md
-            git diff --name-only --diff-filter=U >> conflict_report.md
-            echo "" >> conflict_report.md
+              echo "## Conflict Details" >> conflict_report.md
+              git status --short | grep "^UU" >> conflict_report.md || true
 
-            echo "## Conflict Details" >> conflict_report.md
-            git status --short | grep "^UU" >> conflict_report.md || true
-
-            # Don't abort - keep the branch with conflict markers
-            # This allows the branch to be pushed for manual resolution
-            echo "Branch will be pushed with conflict markers for manual resolution"
+              # Don't abort - keep the branch with conflict markers
+              # This allows the branch to be pushed for manual resolution
+              echo "Branch will be pushed with conflict markers for manual resolution"
+            fi
           fi
 
       - name: Set up Python
